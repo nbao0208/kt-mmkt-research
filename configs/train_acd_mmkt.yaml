@@ -51,3 +51,12 @@ profiles:
     num_workers: 4
     pin_memory: true
     assigned_folds: [3, 4]
+
+  kaggle_t4:
+    device: "cuda:0"
+    precision: "amp_fp16"
+    batch_size: 128
+    grad_accum_steps: 1
+    test_batch_size: 256
+    num_workers: 2
+    pin_memory: true

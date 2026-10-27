@@ -53,9 +53,9 @@ Thumbs.db
 # ==============================================================================
 # Jupyter Notebooks & checkpoints
 # ==============================================================================
-.ipynb_checkpoints
+.ipynb_checkpoints/
 */.ipynb_checkpoints/*
-notebooks/
+*.ipynb_checkpoints*
 
 # ==============================================================================
 # Non-training collateral (presentations, docs, plans, reviews)
