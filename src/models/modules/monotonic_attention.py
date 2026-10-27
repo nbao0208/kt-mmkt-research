@@ -160,13 +160,18 @@ class AsymmetricMonotonicAttention(nn.Module):
         self.ln_ret = nn.LayerNorm(d_model)
         self.dropout = nn.Dropout(dropout)
 
-    def _get_causal_mask(self, seq_len: int, device: torch.device) -> torch.Tensor:
+    def _get_causal_mask(
+        self, seq_len: int, device: torch.device, is_additive: bool = False
+    ) -> torch.Tensor:
         """
-        Generate standard upper-triangular additive causal mask.
-        Values: 0.0 for allowed positions, -1e4 for forbidden future positions.
+        Generate upper-triangular causal mask.
+        - If is_additive=False: returns boolean mask (True for masked positions, False for allowed).
+          Matches key_padding_mask dtype (bool) to avoid PyTorch mismatched mask warning and enable fast SDPA.
+        - If is_additive=True: returns additive float mask (0.0 for allowed, -1e4 for masked positions).
         """
-        mask = torch.triu(torch.full((seq_len, seq_len), -1e4, device=device), diagonal=1)
-        return mask
+        if is_additive:
+            return torch.triu(torch.full((seq_len, seq_len), -1e4, device=device), diagonal=1)
+        return torch.triu(torch.ones((seq_len, seq_len), device=device, dtype=torch.bool), diagonal=1)
 
     def build_acquisition_vectors(
         self,
@@ -275,7 +280,7 @@ class AsymmetricMonotonicAttention(nn.Module):
 
         # Causal mask: query at step t can only attend to key tau' <= t
         # (which maps to history items 0..t-1)
-        causal_mask = self._get_causal_mask(L, device=device)  # [L, L] with -1e4 above diagonal
+        causal_mask = self._get_causal_mask(L, device=device, is_additive=True)  # [L, L] with -1e4 above diagonal
         scores_masked = scores + causal_mask.unsqueeze(0)      # [B, L, L]
 
         # 4. Intermediate semantic similarity distribution gamma_{t, tau'}
