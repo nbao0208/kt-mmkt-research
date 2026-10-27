@@ -1,0 +1,130 @@
+# ==============================================================================
+# Byte-compiled / optimized / DLL files
+# ==============================================================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+
+# ==============================================================================
+# Distribution / packaging / virtual environments
+# ==============================================================================
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# ==============================================================================
+# OS and IDE files
+# ==============================================================================
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# ==============================================================================
+# Jupyter Notebooks & checkpoints
+# ==============================================================================
+.ipynb_checkpoints
+*/.ipynb_checkpoints/*
+notebooks/
+
+# ==============================================================================
+# Non-training collateral (presentations, docs, plans, reviews)
+# ==============================================================================
+presentations/
+docs/
+plans/
+reviews/
+
+# ==============================================================================
+# Markdown documentation rules:
+# Exclude all markdown files except the 2 model instruction files
+# ==============================================================================
+*.md
+!/ACD-MMKT-INSTRUCTION.md
+!/MG-MMKT-INSTRUCTION.md
+
+# ==============================================================================
+# Logs and experiment tracking
+# ==============================================================================
+*.log
+*.log.*
+outputs/logs/*
+!outputs/logs/.gitkeep
+outputs/reports/*
+!outputs/reports/.gitkeep
+wandb/
+runs/
+.tensorboard/
+
+# ==============================================================================
+# PyTorch checkpoints and large model weights
+# ==============================================================================
+*.pt
+*.pth
+*.bin
+*.onnx
+*.safetensors
+*.ckpt
+outputs/checkpoints/*
+!outputs/checkpoints/.gitkeep
+
+# ==============================================================================
+# Data files (all data uploaded to Kaggle directly; keep directory skeleton)
+# ==============================================================================
+data/*
+!data/raw/
+!data/processed/
+!data/features/
+!data/splits/
+data/raw/*
+!data/raw/.gitkeep
+data/processed/*
+!data/processed/.gitkeep
+data/features/*
+!data/features/.gitkeep
+data/splits/*
+!data/splits/.gitkeep
+
+# Large / binary data formats
+*.h5
+*.hdf5
+*.npy
+*.npz
+*.tar.gz
+*.tar
+*.gz
+*.zip
+*.parquet
+*.feather
+*.pkl
+*.pickle

@@ -1,0 +1,16 @@
+# Training & Optimization Configuration for MG-MMKT
+val_fold: 0
+batch_size: 64
+test_batch_size: 128
+num_workers: 2
+num_epochs: 50
+lr: 1e-3
+weight_decay: 1e-4
+max_grad_norm: 1.0
+patience: 10
+warmup_epochs: 2
+eta_min: 1e-5
+seed: 42
+device: "auto"
+save_dir: "outputs/checkpoints/mg_mmkt_fold0"
+log_dir: "outputs/logs"

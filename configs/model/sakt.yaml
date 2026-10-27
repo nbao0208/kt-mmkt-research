@@ -1,0 +1,8 @@
+# Model Architecture Hyperparameters for ID-Only SAKT Baseline
+model_name: "sakt"
+num_questions: 7652
+num_kcs: 1175
+d_model: 128
+num_heads: 4
+max_seq_len: 200
+dropout: 0.20

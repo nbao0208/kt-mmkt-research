@@ -1,0 +1,26 @@
+# Model Architecture Hyperparameters for ACD-MMKT
+model_name: "acd_mmkt"
+num_questions: 7652
+num_kcs: 1175
+d_raw_txt: 768
+d_raw_img: 768
+d_ctx: 21
+d_model: 128
+num_heads: 4
+max_seq_len: 200
+dropout: 0.20
+hgnn_layers: 2
+tau_temp: 0.10
+beta_distill: 0.10
+beta_ctt: 0.20
+beta_disen: 0.05
+lambda_res: 0.001
+irt_scale: 4.0
+
+# Modality & Ablation Flags (all true / default for full ACD-MMKT)
+use_solution: true
+use_visual: true
+use_distillation: true      # Ablation 2: false disables student solution complexity distillation
+use_fine_grained: true      # Ablation 3: false uses global pooled embeddings instead of token/patch attention
+use_hypergraph_rasch: true  # Ablation 4: false uses standard skill lookup without HGNN/Rasch
+use_deep_irt: true          # Ablation 5: false replaces DeepIRT with black-box MLP

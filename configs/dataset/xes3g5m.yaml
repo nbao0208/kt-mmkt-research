@@ -1,0 +1,8 @@
+# Dataset Configuration for XES3G5M
+dataset_name: "XES3G5M"
+data_dir: "data/processed/XES3G5M"
+num_questions: 7652
+num_kcs: 1175
+max_seq_len: 200
+p_drop: 0.20
+test_stride: 100

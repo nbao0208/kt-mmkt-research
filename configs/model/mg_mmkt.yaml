@@ -1,0 +1,17 @@
+# Model Architecture Hyperparameters for MG-MMKT
+model_name: "mg_mmkt"
+num_questions: 7652
+num_kcs: 1175
+d_raw_txt: 768
+d_raw_img: 768
+d_model: 128
+num_heads: 4
+max_seq_len: 200
+dropout: 0.20
+
+# Ablation Flags (all true for full MG-MMKT)
+use_solution: true
+use_visual: true
+use_learnable_imputation: true
+use_gated_fusion: true
+fusion_mode: "gated"

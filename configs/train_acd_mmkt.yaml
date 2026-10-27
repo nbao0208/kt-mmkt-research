@@ -1,0 +1,53 @@
+# Training & Optimization Configuration for ACD-MMKT (Two-Stage Curriculum)
+val_fold: 0
+seed: 42
+data_dir: "data/processed/XES3G5M"
+save_dir: "outputs/checkpoints/acd_mmkt_fold0"
+log_dir: "outputs/logs"
+
+# Stage 1: Item-Bank Multimodal Pre-training
+stage1_epochs: 15
+stage1_batch_size: 256
+stage1_lr: 0.001
+
+# Stage 2: Sequential KT Fine-tuning
+num_epochs: 50
+lr: 0.001
+weight_decay: 0.0001
+max_grad_norm: 1.0
+patience: 10
+warmup_epochs: 2
+eta_min: 0.00001
+p_drop: 0.20
+test_stride: 100
+
+# Hardware execution profiles
+profiles:
+  m1_pro:
+    device: "mps"
+    precision: "fp32"
+    batch_size: 32
+    grad_accum_steps: 2
+    test_batch_size: 64
+    num_workers: 0
+    pin_memory: false
+
+  dual_gpu_5060ti:
+    device: "cuda:0"
+    precision: "amp_fp16"
+    batch_size: 128
+    grad_accum_steps: 1
+    test_batch_size: 256
+    num_workers: 4
+    pin_memory: true
+    assigned_folds: [0, 1, 2]
+
+  dual_gpu_3060:
+    device: "cuda:1"
+    precision: "amp_fp16"
+    batch_size: 64
+    grad_accum_steps: 2
+    test_batch_size: 128
+    num_workers: 4
+    pin_memory: true
+    assigned_folds: [3, 4]
