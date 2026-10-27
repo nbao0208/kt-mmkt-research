@@ -195,13 +195,13 @@ class ACDMMKT(nn.Module):
         Preserves FP16 precision for 4.3 GB fine-grained token/patch tensors to
         minimize GPU/MPS RAM consumption.
         """
-        # Fine-grained token/patch tensors stored in float16
-        self.register_buffer("acd_E_txt_q", static_item_bank["acd_E_txt_q"])          # [7652, 128, 768] fp16
-        self.register_buffer("acd_mask_txt_q", static_item_bank["acd_mask_txt_q"])    # [7652, 128] bool
-        self.register_buffer("acd_E_img_q", static_item_bank["acd_E_img_q"])          # [7652, 49, 768] fp16
-        self.register_buffer("acd_E_txt_s", static_item_bank["acd_E_txt_s"])          # [7652, 160, 768] fp16
-        self.register_buffer("acd_mask_txt_s", static_item_bank["acd_mask_txt_s"])    # [7652, 160] bool
-        self.register_buffer("acd_E_img_s", static_item_bank["acd_E_img_s"])          # [7652, 49, 768] fp16
+        # Fine-grained token/patch tensors explicitly stored in float16
+        self.register_buffer("acd_E_txt_q", static_item_bank["acd_E_txt_q"].half())          # [7652, 128, 768] fp16
+        self.register_buffer("acd_mask_txt_q", static_item_bank["acd_mask_txt_q"])          # [7652, 128] bool
+        self.register_buffer("acd_E_img_q", static_item_bank["acd_E_img_q"].half())          # [7652, 49, 768] fp16
+        self.register_buffer("acd_E_txt_s", static_item_bank["acd_E_txt_s"].half())          # [7652, 160, 768] fp16
+        self.register_buffer("acd_mask_txt_s", static_item_bank["acd_mask_txt_s"])          # [7652, 160] bool
+        self.register_buffer("acd_E_img_s", static_item_bank["acd_E_img_s"].half())          # [7652, 49, 768] fp16
 
         # Hypergraph structures in float32
         self.register_buffer("acd_kc_init_emb", static_item_bank["acd_kc_init_emb"].float())      # [1175, 768]
@@ -214,13 +214,12 @@ class ACDMMKT(nn.Module):
         if "question_static_ctx" in static_item_bank:
             self.register_buffer("question_static_ctx", static_item_bank["question_static_ctx"].float())  # [7652, 15]
 
-
         # Global pooled vectors for Ablation 3 (w/o Fine-Grained Alignment)
         if "mg_v_txt_q" in static_item_bank:
-            self.register_buffer("mg_v_txt_q", static_item_bank["mg_v_txt_q"])
-            self.register_buffer("mg_v_txt_s", static_item_bank["mg_v_txt_s"])
-            self.register_buffer("mg_v_img_q", static_item_bank["mg_v_img_q"])
-            self.register_buffer("mg_v_img_s", static_item_bank["mg_v_img_s"])
+            self.register_buffer("mg_v_txt_q", static_item_bank["mg_v_txt_q"].half())
+            self.register_buffer("mg_v_txt_s", static_item_bank["mg_v_txt_s"].half())
+            self.register_buffer("mg_v_img_q", static_item_bank["mg_v_img_q"].half())
+            self.register_buffer("mg_v_img_s", static_item_bank["mg_v_img_s"].half())
 
 
     def forward_item_bank(
@@ -328,6 +327,7 @@ class ACDMMKT(nn.Module):
         delta_t_kc: Optional[torch.Tensor] = None,
         batch_flag: Optional[torch.Tensor] = None,
         seq_mask: Optional[torch.Tensor] = None,
+        return_cross_weights: bool = False,
     ) -> Dict[str, torch.Tensor]:
         """
         Stage 2 Forward Pass: Sequential Interaction Modeling.
@@ -407,6 +407,7 @@ class ACDMMKT(nn.Module):
             dynamic_ctx=dynamic_ctx,
             q_indices=q_seq,
             static_modality_masks=self.modality_masks,
+            return_cross_weights=return_cross_weights,
             **mg_kwargs,
         )
         v_stem = sub1_out["v_stem"]    # [B, L, d]

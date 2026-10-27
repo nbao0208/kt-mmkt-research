@@ -310,8 +310,11 @@ class ACDMMKTTrainer:
         elapsed = time.time() - start_time
         self.logger.info(f"Stage 1 complete in {elapsed:.1f}s.")
 
-        # Clean up Stage 1 optimizer and free residual GPU cache before Stage 2
+        # Clean up Stage 1 gradients and optimizer, free residual GPU cache before Stage 2
+        self.model.zero_grad(set_to_none=True)
         del stage1_optimizer
+        import gc
+        gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
@@ -326,7 +329,7 @@ class ACDMMKTTrainer:
         num_batches = 0
         start_time = time.time()
 
-        self.optimizer.zero_grad()
+        self.optimizer.zero_grad(set_to_none=True)
 
         for batch_idx, batch in enumerate(self.train_loader):
             for k, v in batch.items():
@@ -380,7 +383,7 @@ class ACDMMKTTrainer:
                         clip_grad_norm_(self.model.parameters(), max_norm=self.max_grad_norm)
                     self.optimizer.step()
 
-                self.optimizer.zero_grad()
+                self.optimizer.zero_grad(set_to_none=True)
 
             total_loss += loss.item()
             num_batches += 1
@@ -429,8 +432,10 @@ class ACDMMKTTrainer:
 
         metrics = calculate_metrics(all_preds, all_targets)
 
-        # Release MPS / Metal cache after evaluation pass on Apple Silicon
-        if self.device.type == "mps" and hasattr(torch.mps, "empty_cache"):
+        # Release GPU / MPS cache after evaluation pass
+        if self.device.type == "cuda" and torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        elif self.device.type == "mps" and hasattr(torch.mps, "empty_cache"):
             torch.mps.empty_cache()
 
         self.logger.info(

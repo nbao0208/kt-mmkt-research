@@ -29,6 +29,10 @@ import subprocess
 import time
 from typing import Dict, Any, List
 import numpy as np
+
+# Set memory management configuration before torch CUDA initialization
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
 import torch
 
 # Ensure project root is in sys.path

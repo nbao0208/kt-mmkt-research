@@ -201,6 +201,7 @@ class FineGrainedCrossModalAlignment(nn.Module):
         mg_v_img_q: Optional[torch.Tensor] = None,
         mg_v_txt_s: Optional[torch.Tensor] = None,
         mg_v_img_s: Optional[torch.Tensor] = None,
+        return_cross_weights: bool = False,
     ) -> Dict[str, torch.Tensor]:
         """
         Process static item-level features on unique question indices.
@@ -219,6 +220,7 @@ class FineGrainedCrossModalAlignment(nn.Module):
             mg_v_img_q: Optional pre-extracted global question image vectors [N, d_raw_img].
             mg_v_txt_s: Optional pre-extracted global solution text vectors [N, d_raw_txt].
             mg_v_img_s: Optional pre-extracted global solution image vectors [N, d_raw_img].
+            return_cross_weights: Whether to compute and retain cross-modal attention matrix.
 
         Returns:
             Dictionary containing item-level pooled vectors:
@@ -226,13 +228,13 @@ class FineGrainedCrossModalAlignment(nn.Module):
             - 'u_cross_q': [N, d]
             - 'u_txt_s': [N, d]
             - 'u_cross_s': [N, d]
-            - 'A_cross_q': [N, L_q, P] fine-grained cross-attention weights.
+            - 'A_cross_q': [N, L_q, P] fine-grained cross-attention weights (or None).
         """
         N = E_txt_q.size(0)
 
         # Micro-chunking across unique items to prevent CUDA Out-Of-Memory (OOM) on GPUs with <= 16GB VRAM
-        if N > 256:
-            chunk_size = 256
+        if N > 128:
+            chunk_size = 128
             out_u_txt_q, out_u_cross_q = [], []
             out_u_txt_s, out_u_cross_s = [], []
             out_A_cross_q = []
@@ -251,19 +253,21 @@ class FineGrainedCrossModalAlignment(nn.Module):
                     mg_v_img_q=mg_v_img_q[i:end_i] if mg_v_img_q is not None else None,
                     mg_v_txt_s=mg_v_txt_s[i:end_i] if mg_v_txt_s is not None else None,
                     mg_v_img_s=mg_v_img_s[i:end_i] if mg_v_img_s is not None else None,
+                    return_cross_weights=return_cross_weights,
                 )
                 out_u_txt_q.append(chunk_res["u_txt_q"])
                 out_u_cross_q.append(chunk_res["u_cross_q"])
                 out_u_txt_s.append(chunk_res["u_txt_s"])
                 out_u_cross_s.append(chunk_res["u_cross_s"])
-                out_A_cross_q.append(chunk_res["A_cross_q"])
+                if chunk_res["A_cross_q"] is not None:
+                    out_A_cross_q.append(chunk_res["A_cross_q"])
 
             return {
                 "u_txt_q": torch.cat(out_u_txt_q, dim=0),
                 "u_cross_q": torch.cat(out_u_cross_q, dim=0),
                 "u_txt_s": torch.cat(out_u_txt_s, dim=0),
                 "u_cross_s": torch.cat(out_u_cross_s, dim=0),
-                "A_cross_q": torch.cat(out_A_cross_q, dim=0),
+                "A_cross_q": torch.cat(out_A_cross_q, dim=0) if out_A_cross_q else None,
             }
 
         # Ensure float32 for computation stability
@@ -335,25 +339,33 @@ class FineGrainedCrossModalAlignment(nn.Module):
 
 
         # --- Question Processing ---
-        # 1. Intra-Modal Self-Attention
-        # Key padding mask: True for positions that should be ignored
+        # 1. Intra-Modal Self-Attention (need_weights=False avoids allocating large attention matrices and enables SDPA)
         txt_q_pad_mask = ~mask_txt_q  # [N, L_q]
         txt_q_intra, _ = self.intra_txt_q(
-            E_txt_q, E_txt_q, E_txt_q, key_padding_mask=txt_q_pad_mask
+            E_txt_q, E_txt_q, E_txt_q, key_padding_mask=txt_q_pad_mask, need_weights=False
         )
         hat_E_txt_q = self.ln_intra_txt_q(E_txt_q + self.dropout(txt_q_intra))
 
-        img_q_intra, _ = self.intra_img_q(cur_E_img_q, cur_E_img_q, cur_E_img_q)
+        img_q_intra, _ = self.intra_img_q(cur_E_img_q, cur_E_img_q, cur_E_img_q, need_weights=False)
         hat_E_img_q = self.ln_intra_img_q(cur_E_img_q + self.dropout(img_q_intra))
 
         # 2. Text-Guided Cross-Modal Attention (Q = text, K, V = image)
-        C_cross_q, A_cross_q = self.cross_attn_q(
-            query=hat_E_txt_q,
-            key=hat_E_img_q,
-            value=hat_E_img_q,
-            need_weights=True,
-            average_attn_weights=True,
-        )
+        if return_cross_weights:
+            C_cross_q, A_cross_q = self.cross_attn_q(
+                query=hat_E_txt_q,
+                key=hat_E_img_q,
+                value=hat_E_img_q,
+                need_weights=True,
+                average_attn_weights=True,
+            )
+        else:
+            C_cross_q, _ = self.cross_attn_q(
+                query=hat_E_txt_q,
+                key=hat_E_img_q,
+                value=hat_E_img_q,
+                need_weights=False,
+            )
+            A_cross_q = None
         hat_C_cross_q = self.ln_cross_q(hat_E_txt_q + self.dropout(C_cross_q))
 
         # 3. Masked Attention Pooling
@@ -361,14 +373,14 @@ class FineGrainedCrossModalAlignment(nn.Module):
         u_cross_q, _ = self.pool_cross_q(hat_C_cross_q, mask=mask_txt_q)
 
         # --- Solution Processing ---
-        # 1. Intra-Modal Self-Attention
+        # 1. Intra-Modal Self-Attention (need_weights=False enables SDPA)
         txt_s_pad_mask = ~mask_txt_s  # [N, L_s]
         txt_s_intra, _ = self.intra_txt_s(
-            E_txt_s, E_txt_s, E_txt_s, key_padding_mask=txt_s_pad_mask
+            E_txt_s, E_txt_s, E_txt_s, key_padding_mask=txt_s_pad_mask, need_weights=False
         )
         hat_E_txt_s = self.ln_intra_txt_s(E_txt_s + self.dropout(txt_s_intra))
 
-        img_s_intra, _ = self.intra_img_s(cur_E_img_s, cur_E_img_s, cur_E_img_s)
+        img_s_intra, _ = self.intra_img_s(cur_E_img_s, cur_E_img_s, cur_E_img_s, need_weights=False)
         hat_E_img_s = self.ln_intra_img_s(cur_E_img_s + self.dropout(img_s_intra))
 
         # 2. Text-Guided Cross-Modal Attention
@@ -476,6 +488,7 @@ class FineGrainedCrossModalAlignment(nn.Module):
         mg_v_img_q: Optional[torch.Tensor] = None,
         mg_v_txt_s: Optional[torch.Tensor] = None,
         mg_v_img_s: Optional[torch.Tensor] = None,
+        return_cross_weights: Optional[bool] = None,
     ) -> Dict[str, torch.Tensor]:
         """
         Forward pass for Subsystem 1.
@@ -497,6 +510,7 @@ class FineGrainedCrossModalAlignment(nn.Module):
             mg_v_img_q: Optional pre-extracted global question image vectors [|Q|, 768].
             mg_v_txt_s: Optional pre-extracted global solution text vectors [|Q|, 768].
             mg_v_img_s: Optional pre-extracted global solution image vectors [|Q|, 768].
+            return_cross_weights: Optional flag to compute and retain cross-modal attention matrix.
 
         Returns:
             Dictionary containing:
@@ -510,49 +524,77 @@ class FineGrainedCrossModalAlignment(nn.Module):
         m_txt_s = modality_masks[..., 1:2]
         m_img_s = modality_masks[..., 2:3]
 
+        if return_cross_weights is None:
+            return_cross_weights = (q_indices is None)
+
         if q_indices is not None and q_indices.ndim == 2:
             # Stage 2 Sequence Mode: Perform Unique-Question Batch Indexing
             B, L = q_indices.shape
             unique_q, inv_idx = torch.unique(q_indices, return_inverse=True)
             N_uniq = unique_q.size(0)
 
-            # Retrieve fine-grained features only for unique questions in batch
-            u_E_txt_q = E_txt_q[unique_q]
-            u_mask_txt_q = mask_txt_q[unique_q]
-            u_E_img_q = E_img_q[unique_q]
-            u_E_txt_s = E_txt_s[unique_q]
-            u_mask_txt_s = mask_txt_s[unique_q]
-            u_E_img_s = E_img_s[unique_q]
+            # Micro-chunk directly over unique_q to avoid materializing large intermediate tensors
+            chunk_size = 128
+            out_u_txt_q, out_u_cross_q = [], []
+            out_u_txt_s, out_u_cross_s = [], []
+            out_A_cross_q = []
 
-            u_mg_v_txt_q = mg_v_txt_q[unique_q] if mg_v_txt_q is not None else None
-            u_mg_v_img_q = mg_v_img_q[unique_q] if mg_v_img_q is not None else None
-            u_mg_v_txt_s = mg_v_txt_s[unique_q] if mg_v_txt_s is not None else None
-            u_mg_v_img_s = mg_v_img_s[unique_q] if mg_v_img_s is not None else None
+            for i in range(0, N_uniq, chunk_size):
+                end_i = min(i + chunk_size, N_uniq)
+                c_q = unique_q[i:end_i]
 
-            # Unique presence flags for static items
-            if static_modality_masks is not None:
-                u_m_img_q = static_modality_masks[unique_q, 0:1]
-                u_m_img_s = static_modality_masks[unique_q, 2:3]
-            else:
-                flat_masks = modality_masks.reshape(B * L, -1)
-                flat_q = q_indices.reshape(B * L)
-                u_m_img_q = torch.stack([flat_masks[flat_q == uq][0, 0:1] for uq in unique_q], dim=0)
-                u_m_img_s = torch.stack([flat_masks[flat_q == uq][0, 2:3] for uq in unique_q], dim=0)
+                # Retrieve fine-grained features only for this micro-chunk
+                c_E_txt_q = E_txt_q[c_q]
+                c_mask_txt_q = mask_txt_q[c_q]
+                c_E_img_q = E_img_q[c_q]
+                c_E_txt_s = E_txt_s[c_q]
+                c_mask_txt_s = mask_txt_s[c_q]
+                c_E_img_s = E_img_s[c_q]
 
-            item_out = self.process_unique_items(
-                E_txt_q=u_E_txt_q,
-                mask_txt_q=u_mask_txt_q,
-                E_img_q=u_E_img_q,
-                E_txt_s=u_E_txt_s,
-                mask_txt_s=u_mask_txt_s,
-                E_img_s=u_E_img_s,
-                m_img_q=u_m_img_q,
-                m_img_s=u_m_img_s,
-                mg_v_txt_q=u_mg_v_txt_q,
-                mg_v_img_q=u_mg_v_img_q,
-                mg_v_txt_s=u_mg_v_txt_s,
-                mg_v_img_s=u_mg_v_img_s,
-            )
+                c_mg_v_txt_q = mg_v_txt_q[c_q] if mg_v_txt_q is not None else None
+                c_mg_v_img_q = mg_v_img_q[c_q] if mg_v_img_q is not None else None
+                c_mg_v_txt_s = mg_v_txt_s[c_q] if mg_v_txt_s is not None else None
+                c_mg_v_img_s = mg_v_img_s[c_q] if mg_v_img_s is not None else None
+
+                # Unique presence flags for static items in this micro-chunk
+                if static_modality_masks is not None:
+                    c_m_img_q = static_modality_masks[c_q, 0:1]
+                    c_m_img_s = static_modality_masks[c_q, 2:3]
+                else:
+                    flat_masks = modality_masks.reshape(B * L, -1)
+                    flat_q = q_indices.reshape(B * L)
+                    c_m_img_q = torch.stack([flat_masks[flat_q == uq][0, 0:1] for uq in c_q], dim=0)
+                    c_m_img_s = torch.stack([flat_masks[flat_q == uq][0, 2:3] for uq in c_q], dim=0)
+
+                chunk_res = self.process_unique_items(
+                    E_txt_q=c_E_txt_q,
+                    mask_txt_q=c_mask_txt_q,
+                    E_img_q=c_E_img_q,
+                    E_txt_s=c_E_txt_s,
+                    mask_txt_s=c_mask_txt_s,
+                    E_img_s=c_E_img_s,
+                    m_img_q=c_m_img_q,
+                    m_img_s=c_m_img_s,
+                    mg_v_txt_q=c_mg_v_txt_q,
+                    mg_v_img_q=c_mg_v_img_q,
+                    mg_v_txt_s=c_mg_v_txt_s,
+                    mg_v_img_s=c_mg_v_img_s,
+                    return_cross_weights=return_cross_weights,
+                )
+                out_u_txt_q.append(chunk_res["u_txt_q"])
+                out_u_cross_q.append(chunk_res["u_cross_q"])
+                out_u_txt_s.append(chunk_res["u_txt_s"])
+                out_u_cross_s.append(chunk_res["u_cross_s"])
+                if chunk_res["A_cross_q"] is not None:
+                    out_A_cross_q.append(chunk_res["A_cross_q"])
+
+            item_out = {
+                "u_txt_q": torch.cat(out_u_txt_q, dim=0),
+                "u_cross_q": torch.cat(out_u_cross_q, dim=0),
+                "u_txt_s": torch.cat(out_u_txt_s, dim=0),
+                "u_cross_s": torch.cat(out_u_cross_s, dim=0),
+                "A_cross_q": torch.cat(out_A_cross_q, dim=0) if out_A_cross_q else None,
+            }
 
             # Scatter back to sequence dimensions [B, L, d]
             seq_u_txt_q = item_out["u_txt_q"][inv_idx].view(B, L, self.d_model)
@@ -599,6 +641,7 @@ class FineGrainedCrossModalAlignment(nn.Module):
                 mg_v_img_q=mg_v_img_q,
                 mg_v_txt_s=mg_v_txt_s,
                 mg_v_img_s=mg_v_img_s,
+                return_cross_weights=return_cross_weights,
             )
 
 

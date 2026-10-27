@@ -66,7 +66,7 @@ class ACDExplainabilityEngine:
             if isinstance(v, torch.Tensor):
                 batch[k] = v.to(self.device)
 
-        outputs = self.model(batch)
+        outputs = self.model(batch, return_cross_weights=True)
 
         B, L = batch["q_seq"].shape
         b = batch_idx
@@ -166,7 +166,7 @@ class ACDExplainabilityEngine:
 
         # Cross-modal keyword-to-patch visual alignments (Tier 2, Plan Step 5.1)
         top_alignments = []
-        if has_image and "A_cross_q" in outputs and "uniq_q" in outputs:
+        if has_image and outputs.get("A_cross_q") is not None and "uniq_q" in outputs:
             uniq_q_ref = outputs["uniq_q"].cpu()
             A_cross_ref = outputs["A_cross_q"].cpu()
             matches = (uniq_q_ref == q_id).nonzero(as_tuple=True)[0]
