@@ -309,6 +309,12 @@ class ACDMMKTTrainer:
 
         elapsed = time.time() - start_time
         self.logger.info(f"Stage 1 complete in {elapsed:.1f}s.")
+
+        # Clean up Stage 1 optimizer and free residual GPU cache before Stage 2
+        del stage1_optimizer
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
         return stage1_history
 
     def train_epoch_stage2(self, epoch: int) -> Dict[str, float]:

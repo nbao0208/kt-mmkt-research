@@ -456,7 +456,10 @@ class ACDMMKT(nn.Module):
 
         # Unique item tensors for efficient distillation loss computation
         uniq_q = sub1_out["uniq_q"]
-        uniq_m_txt_s = self.modality_masks[uniq_q, 1:2]  # [N_uniq, 1]
+        # Ensure questions appearing purely as padding (seq_mask == False) are excluded from distillation loss
+        active_q = q_seq[seq_mask].unique()
+        is_active = torch.isin(uniq_q, active_q).unsqueeze(-1)
+        uniq_m_txt_s = self.modality_masks[uniq_q, 1:2] * is_active.float()  # [N_uniq, 1]
         # In batch indexing, compute hat_v_sol for unique items directly
         uniq_leaf_kcs = self.question_leaf_kcs[uniq_q]
         uniq_leaf_kc_mask = self.question_kc_mask[uniq_q]

@@ -172,17 +172,30 @@ class OrthogonalDisentanglementLoss(nn.Module):
     def __init__(self):
         super().__init__()
 
-    def forward(self, c_C: torch.Tensor, d_q: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        c_C: torch.Tensor,
+        d_q: torch.Tensor,
+        mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         """
         Args:
             c_C: Concept representations [..., d].
             d_q: Item-specific variation representations [..., d].
+            mask: Optional boolean or float validity mask [...] indicating active interactions.
 
         Returns:
             Scalar orthogonality loss.
         """
-        c_flat = c_C.reshape(-1, c_C.size(-1)).float()
-        d_flat = d_q.reshape(-1, d_q.size(-1)).float()
+        if mask is not None:
+            flat_mask = mask.reshape(-1).bool()
+            if not flat_mask.any():
+                return torch.tensor(0.0, device=c_C.device, requires_grad=True)
+            c_flat = c_C.reshape(-1, c_C.size(-1))[flat_mask].float()
+            d_flat = d_q.reshape(-1, d_q.size(-1))[flat_mask].float()
+        else:
+            c_flat = c_C.reshape(-1, c_C.size(-1)).float()
+            d_flat = d_q.reshape(-1, d_q.size(-1)).float()
 
         cos_sim = F.cosine_similarity(c_flat, d_flat, dim=-1, eps=1e-8)
         return torch.mean(cos_sim ** 2)
@@ -329,9 +342,9 @@ class ACDMMKTLoss(nn.Module):
         else:
             l_ctt = torch.tensor(0.0, device=logits.device)
 
-        # Orthogonal disentanglement loss
+        # Orthogonal disentanglement loss (masked by loss_mask to exclude padding tokens)
         if self.beta_disen > 0.0:
-            l_disen = self.disen_loss_fn(c_C, d_q)
+            l_disen = self.disen_loss_fn(c_C, d_q, mask=loss_mask)
         else:
             l_disen = torch.tensor(0.0, device=logits.device)
 

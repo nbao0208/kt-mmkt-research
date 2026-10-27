@@ -199,6 +199,11 @@ def main():
         logger=logger,
     )
 
+    # Free CPU static item bank reference
+    del static_item_bank
+    import gc
+    gc.collect()
+
     # 5. Execute Two-Stage Curriculum Training
     stage1_epochs = args.stage1_epochs if args.stage1_epochs is not None else int(train_cfg.get("stage1_epochs", 15))
     stage1_lr = args.stage1_lr if args.stage1_lr is not None else float(train_cfg.get("stage1_lr", 1e-3))

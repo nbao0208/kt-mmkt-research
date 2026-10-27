@@ -40,6 +40,7 @@ from src.utils.config import load_yaml_config
 from src.data.xes3g5m_dataset import get_xes3g5m_dataloaders
 from src.models.mmkt.acd_mmkt import ACDMMKT
 from src.training.acd_trainer import ACDMMKTTrainer
+from src.evaluation.metrics import calculate_metrics
 
 
 def parse_args():
@@ -59,6 +60,9 @@ def parse_args():
     parser.add_argument("--skip-stage1", action="store_true", help="Skip Stage 1 pre-training")
 
     parser.add_argument("--grad-accum-steps", type=int, default=None, help="Gradient accumulation steps")
+    parser.add_argument("--precision", type=str, choices=["fp32", "amp_fp16", "amp_bf16"], default=None, help="Computation precision")
+    parser.add_argument("--profile", type=str, choices=["m1_pro", "dual_gpu_5060ti", "dual_gpu_3060", "kaggle_t4"], default=None, help="Hardware execution profile")
+    parser.add_argument("--num-workers", type=int, default=None, help="Number of DataLoader worker subprocesses")
     parser.add_argument("--worker-only", action="store_true", help="Internal flag: worker only executes assigned folds without synthesizing summary reports")
 
     # Ablation presets
@@ -89,9 +93,10 @@ def run_single_fold_training(
     """
     Train and evaluate a single cross-validation fold.
     """
-    logger.info(f"--- Launching Fold {fold} on {device} (BatchSize={batch_size}, GradAccum={grad_accum_steps}) ---")
+    logger.info(f"--- Launching Fold {fold} on {device} (BatchSize={batch_size}, GradAccum={grad_accum_steps}, Precision={precision}) ---")
     set_seed(train_cfg.get("seed", 42) + fold)
 
+    logger.info(f"Step 1/4: Loading XES3G5M sequence datasets and item bank for Fold {fold}...")
     train_loader, val_loader, test_loader, item_bank = get_xes3g5m_dataloaders(
         data_dir=data_dir,
         val_fold=fold,
@@ -103,6 +108,7 @@ def run_single_fold_training(
         num_workers=int(train_cfg.get("num_workers", 0)),
     )
 
+    logger.info(f"Step 2/4: Initializing ACDMMKT model and transferring static item bank to {device}...")
     model = ACDMMKT(
         num_questions=model_cfg.get("num_questions", 7652),
         num_kcs=model_cfg.get("num_kcs", 1175),
@@ -129,6 +135,12 @@ def run_single_fold_training(
         static_item_bank=item_bank,
     ).to(device)
 
+    # Immediately release CPU item bank reference and run garbage collection
+    del item_bank
+    import gc
+    gc.collect()
+
+    logger.info(f"Step 3/4: Initializing ACDMMKTTrainer on {device}...")
     trainer = ACDMMKTTrainer(
         model=model,
         train_loader=train_loader,
@@ -160,6 +172,8 @@ def run_single_fold_training(
     stage1_batch_size = int(train_cfg.get("stage1_batch_size", 256))
     stage1_lr = float(train_cfg.get("stage1_lr", 1e-3))
 
+    logger.info(f"Step 4/4: Launching Two-Stage Curriculum Training for Fold {fold} ({num_epochs} Stage-2 epochs)...")
+
     results = trainer.fit(
         num_epochs=num_epochs,
         run_stage1=(not args.skip_stage1),
@@ -168,7 +182,7 @@ def run_single_fold_training(
         stage1_lr=stage1_lr,
     )
 
-    return {
+    out_record = {
         "fold": fold,
         "best_epoch": results["best_epoch"],
         "val_auc": results["best_val_auc"],
@@ -177,6 +191,15 @@ def run_single_fold_training(
         "test_acc": results["test_metrics"]["acc"] if results["test_metrics"] else 0.0,
         "checkpoint": results["best_checkpoint"],
     }
+
+    # Clean up fold instances and release CUDA memory cache between folds
+    del model, trainer, train_loader, val_loader, test_loader
+    import gc
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+    return out_record
 
 
 def evaluate_existing_fold(
@@ -274,6 +297,16 @@ def main():
     dataset_cfg = load_yaml_config(args.config_dataset)
     data_dir = dataset_cfg.get("data_dir", "data/processed/XES3G5M")
 
+    # Apply hardware profile if selected
+    if args.profile and "profiles" in train_cfg and args.profile in train_cfg["profiles"]:
+        prof = train_cfg["profiles"][args.profile]
+        logger.info(f"Applying hardware profile '{args.profile}': {prof}")
+        for k, v in prof.items():
+            train_cfg[k] = v
+
+    if args.num_workers is not None:
+        train_cfg["num_workers"] = args.num_workers
+
     # Apply ablation overrides
     if args.ablation == 2:
         model_cfg["use_distillation"] = False
@@ -301,9 +334,13 @@ def main():
             fold_results.append(res)
     elif args.dual_gpu and torch.cuda.device_count() >= 2:
         # Asynchronous Dual-GPU Scheduling
+        batch_size_gpu = args.batch_size if args.batch_size is not None else int(train_cfg.get("batch_size", 64))
+        grad_accum_gpu = args.grad_accum_steps if args.grad_accum_steps is not None else int(train_cfg.get("grad_accum_steps", 2))
+        precision_gpu = args.precision if args.precision is not None else str(train_cfg.get("precision", "amp_fp16"))
+
         logger.info("Initializing Asynchronous Dual-GPU 5-Fold Execution:")
-        logger.info("- GPU 0 (cuda:0 - RTX 5060 Ti): Folds [0, 1, 2] | batch_size=128, grad_accum=1")
-        logger.info("- GPU 1 (cuda:1 - RTX 3060): Folds [3, 4] | batch_size=64, grad_accum=2")
+        logger.info(f"- GPU 0 (cuda:0): Folds [0, 1, 2] | batch_size={batch_size_gpu}, grad_accum={grad_accum_gpu}, precision={precision_gpu}")
+        logger.info(f"- GPU 1 (cuda:1): Folds [3, 4] | batch_size={batch_size_gpu}, grad_accum={grad_accum_gpu}, precision={precision_gpu}")
 
         # Launch GPU 1 process in background
         cmd_gpu1 = [
@@ -311,8 +348,9 @@ def main():
             __file__,
             "--device", "cuda:1",
             "--folds", "3", "4",
-            "--batch-size", "64",
-            "--grad-accum-steps", "2",
+            "--batch-size", str(batch_size_gpu),
+            "--grad-accum-steps", str(grad_accum_gpu),
+            "--precision", precision_gpu,
             "--checkpoint-dir", str(args.checkpoint_dir),
             "--output-report-dir", str(args.output_report_dir),
             "--config-model", str(args.config_model),
@@ -323,6 +361,10 @@ def main():
         ]
         if args.lr is not None:
             cmd_gpu1.extend(["--lr", str(args.lr)])
+        if args.num_workers is not None:
+            cmd_gpu1.extend(["--num-workers", str(args.num_workers)])
+        if args.profile is not None:
+            cmd_gpu1.extend(["--profile", str(args.profile)])
         if args.skip_stage1:
             cmd_gpu1.append("--skip-stage1")
         if args.ablation is not None:
@@ -342,9 +384,9 @@ def main():
                 data_dir=data_dir,
                 device=torch.device("cuda:0"),
                 save_dir=save_dir,
-                batch_size=128,
-                grad_accum_steps=1,
-                precision="amp_fp16",
+                batch_size=batch_size_gpu,
+                grad_accum_steps=grad_accum_gpu,
+                precision=precision_gpu,
                 logger=logger,
             )
             fold_results.append(res)
@@ -368,7 +410,7 @@ def main():
 
         batch_size = args.batch_size if args.batch_size is not None else int(train_cfg.get("batch_size", 64))
         grad_accum = args.grad_accum_steps if args.grad_accum_steps is not None else int(train_cfg.get("grad_accum_steps", 1))
-        precision = train_cfg.get("precision", "fp32")
+        precision = args.precision if args.precision is not None else train_cfg.get("precision", "amp_fp16" if "cuda" in str(device) else "fp32")
 
         for f in args.folds:
             save_dir = os.path.join(args.checkpoint_dir, f"acd_mmkt_fold{f}")

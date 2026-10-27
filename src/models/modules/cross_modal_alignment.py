@@ -230,6 +230,42 @@ class FineGrainedCrossModalAlignment(nn.Module):
         """
         N = E_txt_q.size(0)
 
+        # Micro-chunking across unique items to prevent CUDA Out-Of-Memory (OOM) on GPUs with <= 16GB VRAM
+        if N > 256:
+            chunk_size = 256
+            out_u_txt_q, out_u_cross_q = [], []
+            out_u_txt_s, out_u_cross_s = [], []
+            out_A_cross_q = []
+            for i in range(0, N, chunk_size):
+                end_i = min(i + chunk_size, N)
+                chunk_res = self.process_unique_items(
+                    E_txt_q=E_txt_q[i:end_i],
+                    mask_txt_q=mask_txt_q[i:end_i],
+                    E_img_q=E_img_q[i:end_i],
+                    E_txt_s=E_txt_s[i:end_i],
+                    mask_txt_s=mask_txt_s[i:end_i],
+                    E_img_s=E_img_s[i:end_i],
+                    m_img_q=m_img_q[i:end_i],
+                    m_img_s=m_img_s[i:end_i],
+                    mg_v_txt_q=mg_v_txt_q[i:end_i] if mg_v_txt_q is not None else None,
+                    mg_v_img_q=mg_v_img_q[i:end_i] if mg_v_img_q is not None else None,
+                    mg_v_txt_s=mg_v_txt_s[i:end_i] if mg_v_txt_s is not None else None,
+                    mg_v_img_s=mg_v_img_s[i:end_i] if mg_v_img_s is not None else None,
+                )
+                out_u_txt_q.append(chunk_res["u_txt_q"])
+                out_u_cross_q.append(chunk_res["u_cross_q"])
+                out_u_txt_s.append(chunk_res["u_txt_s"])
+                out_u_cross_s.append(chunk_res["u_cross_s"])
+                out_A_cross_q.append(chunk_res["A_cross_q"])
+
+            return {
+                "u_txt_q": torch.cat(out_u_txt_q, dim=0),
+                "u_cross_q": torch.cat(out_u_cross_q, dim=0),
+                "u_txt_s": torch.cat(out_u_txt_s, dim=0),
+                "u_cross_s": torch.cat(out_u_cross_s, dim=0),
+                "A_cross_q": torch.cat(out_A_cross_q, dim=0),
+            }
+
         # Ensure float32 for computation stability
         E_txt_q = self.ln_txt_q(self.proj_txt_q(E_txt_q.float()))  # [N, L_q, d]
         E_txt_s = self.ln_txt_s(self.proj_txt_s(E_txt_s.float()))  # [N, L_s, d]

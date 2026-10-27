@@ -83,7 +83,11 @@ def load_static_item_bank_optimized(
 
     if model_type.lower() == "acd_mmkt":
         if os.path.exists(full_path):
-            return torch.load(full_path, map_location="cpu")
+            try:
+                # Use mmap=True to avoid loading 4.5 GB into physical CPU RAM
+                return torch.load(full_path, mmap=True, map_location="cpu")
+            except Exception:
+                return torch.load(full_path, map_location="cpu")
         raise FileNotFoundError(f"Full static item bank not found at {full_path} for acd_mmkt")
 
     if os.path.exists(mg_path):
@@ -128,14 +132,14 @@ class XES3G5MDataset(Dataset):
         self.is_train = is_train
         self.p_drop = p_drop if is_train else 0.0
 
-        # Load Static Item Bank
+        # Load Static Item Bank metadata (avoiding retaining 4.3 GB acd_E_* token/patch tensors in dataset memory)
         if isinstance(static_item_bank, str):
             if os.path.isdir(static_item_bank):
-                self.static_item_bank = load_static_item_bank_optimized(static_item_bank)
+                bank_dict = load_static_item_bank_optimized(static_item_bank)
             else:
-                self.static_item_bank = torch.load(static_item_bank, map_location="cpu")
+                bank_dict = torch.load(static_item_bank, map_location="cpu")
         else:
-            self.static_item_bank = static_item_bank
+            bank_dict = static_item_bank
 
         # Load Sequence Store (merge multiple folds if list provided)
         if isinstance(sequences, str):
@@ -149,20 +153,30 @@ class XES3G5MDataset(Dataset):
         self.max_seq_len = self.seq_data["q_seq"].shape[1]
 
         # Cache reference tensors for quick lookup
-        self.modality_masks = self.static_item_bank["modality_masks"]  # [7652, 3]
-        self.question_leaf_kcs = self.static_item_bank["question_leaf_kcs"]  # [7652, 6]
-        self.question_kc_mask = self.static_item_bank["question_kc_mask"]  # [7652, 6]
-        self.question_static_ctx = self.static_item_bank.get(
+        self.modality_masks = bank_dict["modality_masks"]  # [7652, 3]
+        self.question_leaf_kcs = bank_dict["question_leaf_kcs"]  # [7652, 6]
+        self.question_kc_mask = bank_dict["question_kc_mask"]  # [7652, 6]
+        self.question_static_ctx = bank_dict.get(
             "question_static_ctx", torch.zeros((7652, 15), dtype=torch.float32)
         )
 
         # Fold-specific CTT difficulty labels if available
-        if "acd_ctt_difficulty_folds" in self.static_item_bank:
-            self.ctt_difficulty = self.static_item_bank["acd_ctt_difficulty_folds"][self.fold]  # [7652]
-            self.ctt_valid_mask = self.static_item_bank["acd_ctt_valid_mask"][self.fold]  # [7652]
+        if "acd_ctt_difficulty_folds" in bank_dict:
+            self.ctt_difficulty = bank_dict["acd_ctt_difficulty_folds"][self.fold]  # [7652]
+            self.ctt_valid_mask = bank_dict["acd_ctt_valid_mask"][self.fold]  # [7652]
         else:
             self.ctt_difficulty = torch.zeros(7652, dtype=torch.float32)
             self.ctt_valid_mask = torch.zeros(7652, dtype=torch.bool)
+
+        # Retain only lightweight item metadata (<1 MB) so del static_item_bank can truly free the 4.3 GB dictionary
+        self.static_item_bank = {
+            "modality_masks": self.modality_masks,
+            "question_leaf_kcs": self.question_leaf_kcs,
+            "question_kc_mask": self.question_kc_mask,
+            "question_static_ctx": self.question_static_ctx,
+            "ctt_difficulty": self.ctt_difficulty,
+            "ctt_valid_mask": self.ctt_valid_mask,
+        }
 
         # Precompute or assign loss masks and evaluation masks
         # Standard pyKT KT loss mask: step 0 of each student sequence has loss_mask = 0, steps 1..L follow seq_mask

@@ -199,6 +199,7 @@ Bạn có thể truyền trực tiếp cờ `--profile <tên_profile>` vào lệ
 | `m1_pro` | `mps` | `fp32` | `32` | `2` | `0` | MacBook Pro M1/M2/M3 (16GB RAM) |
 | `dual_gpu_5060ti` | `cuda:0` | `amp_fp16` | `128` | `1` | `4` | NVIDIA GPU $\ge 16\text{ GB}$ (RTX 5060 Ti, RTX 4080, A100) |
 | `dual_gpu_3060` | `cuda:1` | `amp_fp16` | `64` | `2` | `4` | NVIDIA GPU $12\text{ GB}$ (RTX 3060, RTX 4070) |
+| `kaggle_t4` | `cuda:0` | `amp_fp16` | `64` | `2` | `2` | Kaggle 2x NVIDIA Tesla T4 (16GB VRAM) |
 
 ---
 

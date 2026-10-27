@@ -460,3 +460,23 @@ def test_three_tier_explainability(mock_static_bank, mock_batch, tmp_path):
     assert "Cấp Độ 1: Bằng Chứng Tâm Trắc Học Định Lượng" in md_content
     assert "Cấp Độ 2: Bằng Chứng Đa Phương Thức" in md_content
     assert "Cấp Độ 3: Báo Cáo Giải Thích Ngôn Ngữ Tự Nhiên" in md_content
+
+
+def test_disentanglement_loss_with_mask():
+    """Verify that OrthogonalDisentanglementLoss correctly supports optional active masks."""
+    loss_fn = OrthogonalDisentanglementLoss()
+    c_C = torch.randn(4, 20, 64)
+    d_q = torch.randn(4, 20, 64)
+    mask = torch.zeros(4, 20, dtype=torch.bool)
+    mask[:, :5] = True
+
+    loss_unmasked = loss_fn(c_C, d_q)
+    loss_masked = loss_fn(c_C, d_q, mask=mask)
+
+    assert loss_unmasked.ndim == 0 and loss_unmasked.item() >= 0.0
+    assert loss_masked.ndim == 0 and loss_masked.item() >= 0.0
+
+    # All masked case
+    all_false_mask = torch.zeros_like(mask)
+    loss_empty = loss_fn(c_C, d_q, mask=all_false_mask)
+    assert loss_empty.item() == 0.0
