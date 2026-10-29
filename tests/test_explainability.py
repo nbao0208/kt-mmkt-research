@@ -110,3 +110,62 @@ def test_historical_evidence_with_skills_and_offsets():
     assert top1["actual_target_step"] == 160
     assert top1["prior_sink_weight"] == pytest.approx(float(attn[target_t, 0]))
     assert top1["skill_ids"] == [55, 55]
+
+
+def test_multi_level_explainer_v2():
+    """Verify 3-Level Explainability for MG-MMKT v2."""
+    import torch
+    from src.evaluation.explainability_v2 import MultiLevelExplainerV2
+
+    explainer = MultiLevelExplainerV2()
+
+    # 1. Level 1: Modality Attribution
+    N = 50
+    alpha_q = np.random.uniform(0.1, 0.5, (N, 3))
+    alpha_q[:25, 2] += 2.0  # higher for image-present
+    alpha_q = alpha_q / alpha_q.sum(axis=-1, keepdims=True)
+
+    beta_s = np.random.uniform(0.2, 0.8, (N, 2))
+    beta_s = beta_s / beta_s.sum(axis=-1, keepdims=True)
+
+    m_img_q = np.zeros(N)
+    m_img_q[:25] = 1.0
+    m_img_s = np.zeros(N)
+    m_img_s[:25] = 1.0
+
+    l1 = explainer.analyze_level1_modality_attribution(alpha_q, beta_s, m_img_q, m_img_s)
+    assert l1["question_level"]["num_with_image"] == 25
+    assert l1["question_level"]["num_text_only"] == 25
+    assert l1["question_level"]["with_image"]["mean_alpha_img"] > l1["question_level"]["text_only"]["mean_alpha_img"]
+
+    # 2. Level 2: Top-K Historical Evidence
+    gamma_row = np.array([0.1, 0.5, 0.2, 0.2])
+    q_hist = [101, 102, 103, 104]
+    r_hist = [1, 0, 1, 0]  # step 1 is response=0 -> Remedial Pathway
+    ev = explainer.extract_level2_historical_evidence(
+        gamma_bar_row=gamma_row,
+        q_history=q_hist,
+        r_history=r_hist,
+        context_start=50,
+        top_k=2,
+        head_thetas=[0.1, 0.3, 0.7, 1.5],
+    )
+    assert len(ev) == 2
+    assert ev[0]["local_step"] == 1
+    assert ev[0]["global_step"] == 51
+    assert ev[0]["activated_pathway"] == "Remedial Intervention Pathway"
+    assert ev[0]["attention_weight"] == pytest.approx(0.5)
+
+    # 3. Level 3: Implicit Cognitive Demand Attribution
+    d = 64
+    h_t = torch.randn(d)
+    x_t = torch.randn(d)
+    hat_z_t_s = torch.randn(d)
+    z_t_s_clean = torch.randn(d)
+
+    l3 = explainer.analyze_level3_cognitive_demand(h_t, x_t, hat_z_t_s, z_t_s_clean, prob_t=0.3)
+    assert "concept_cosine" in l3
+    assert "cognitive_demand_cosine" in l3
+    assert "distillation_fidelity_cosine" in l3
+    assert "diagnosis" in l3
+

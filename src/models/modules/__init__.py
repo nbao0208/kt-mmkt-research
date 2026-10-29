@@ -12,6 +12,21 @@ from src.models.modules.cross_modal_alignment import FineGrainedCrossModalAlignm
 from src.models.modules.hypergraph_rasch import HypergraphRaschDisentanglement
 from src.models.modules.monotonic_attention import AsymmetricMonotonicAttention
 from src.models.modules.deep_irt_readout import DeepIRTReadout
+from src.models.modules.kc_conditioned_imputation import (
+    StructuralDecouplingLayer,
+    KCConditionedImputationLayer,
+)
+from src.models.modules.dual_stage_gating import (
+    QuestionDualStageGating,
+    SolutionDualStageGating,
+)
+from src.models.modules.cognitive_history_fusion import (
+    CognitiveHistoryFusionLayer,
+)
+from src.models.modules.disentangled_causal_attention import (
+    DisentangledCausalAttention,
+    MultiInteractiveReadout,
+)
 
 __all__ = [
     "ModalityImputationLayer",
@@ -22,4 +37,11 @@ __all__ = [
     "HypergraphRaschDisentanglement",
     "AsymmetricMonotonicAttention",
     "DeepIRTReadout",
+    "StructuralDecouplingLayer",
+    "KCConditionedImputationLayer",
+    "QuestionDualStageGating",
+    "SolutionDualStageGating",
+    "CognitiveHistoryFusionLayer",
+    "DisentangledCausalAttention",
+    "MultiInteractiveReadout",
 ]

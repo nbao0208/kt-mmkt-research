@@ -372,3 +372,178 @@ class ACDMMKTLoss(nn.Module):
             "loss_res_reg": l_res.item(),
         }
         return total_loss, metrics
+
+
+class PrivilegedSolutionDistillationLoss(nn.Module):
+    """
+    Privileged Solution Distillation Loss for MG-MMKT v2 (Formula in docs/models/MG-MMKTv2.md Section 5.2).
+    Combines MSE feature reconstruction and Cosine distance between Student hat_z_s and Teacher sg(z_s_clean).
+    Active on valid interactions where a solution exists (m_sol_t == 1).
+    """
+
+    def __init__(self, eps: float = 1e-8):
+        super().__init__()
+        self.eps = eps
+
+    def forward(
+        self,
+        hat_z_s: torch.Tensor,
+        z_s_clean: torch.Tensor,
+        m_sol: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Args:
+            hat_z_s: Student estimated cognitive demand [B, L, d].
+            z_s_clean: Teacher clean solution representations [B, L, d].
+            m_sol: Binary indicator of solution existence and sequence validity [B, L].
+
+        Returns:
+            Scalar distillation loss.
+        """
+        # Ensure float32 for stable distance computation
+        hat_z = hat_z_s.float()
+        # CRITICAL: Stop gradient on Teacher representation to isolate autograd flow
+        teacher_z = z_s_clean.detach().float()
+
+        mask = m_sol.bool()
+        num_valid = mask.sum().float()
+
+        if num_valid.item() == 0:
+            return torch.tensor(0.0, device=hat_z.device, requires_grad=True)
+
+        valid_hat = hat_z[mask]          # [M, d]
+        valid_teacher = teacher_z[mask]  # [M, d]
+        d = valid_hat.size(-1)
+
+        # 1. Normalized Mean Squared Error (divided by dimension d)
+        mse = torch.mean((valid_hat - valid_teacher) ** 2) / d
+
+        # 2. Cosine Distance: 1 - cos(hat_z, teacher_z)
+        hat_norm = F.normalize(valid_hat, p=2, dim=-1, eps=self.eps)
+        teacher_norm = F.normalize(valid_teacher, p=2, dim=-1, eps=self.eps)
+        cos_sim = (hat_norm * teacher_norm).sum(dim=-1)
+        cos_dist = torch.mean(1.0 - cos_sim)
+
+        return mse + cos_dist
+
+
+class ModalitySuppressionRegularizationLoss(nn.Module):
+    """
+    Modality Suppression Regularization Loss for MG-MMKT v2 (Section 5.3).
+    Penalizes non-zero gate weights on missing visual modalities (alpha_img_q and beta_img_s).
+    """
+
+    def __init__(self):
+        super().__init__()
+
+    def forward(
+        self,
+        alpha_q: torch.Tensor,
+        beta_s: torch.Tensor,
+        m_img_q: torch.Tensor,
+        m_img_s: torch.Tensor,
+        seq_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Args:
+            alpha_q: Question gate weights [B, L, 3] (id, txt, img).
+            beta_s: Solution gate weights [B, L, 2] (txt, img).
+            m_img_q: Question image presence flags [B, L, 1] or [B, L].
+            m_img_s: Solution image presence flags [B, L, 1] or [B, L].
+            seq_mask: Interaction sequence validity mask [B, L].
+
+        Returns:
+            Scalar gate regularization loss.
+        """
+        alpha_img = alpha_q[..., 2].float()  # [B, L]
+        beta_img = beta_s[..., 1].float()    # [B, L]
+        m_q = m_img_q.view_as(alpha_img).float()
+        m_s = m_img_s.view_as(beta_img).float()
+        valid = seq_mask.float()
+
+        # Penalize squared gate weight when modality is missing (1 - m)
+        q_penalty = (1.0 - m_q) * (alpha_img ** 2)
+        s_penalty = (1.0 - m_s) * (beta_img ** 2)
+
+        total_penalty = (q_penalty + s_penalty) * valid
+        total_valid = torch.clamp(valid.sum(), min=1.0)
+        return total_penalty.sum() / total_valid
+
+
+class MGMMKTv2Loss(nn.Module):
+    """
+    End-to-End Multi-Task Loss for MG-MMKT v2:
+    L_total = L_BCE + lambda_priv * L_priv + lambda_gate * L_gate
+    """
+
+    def __init__(
+        self,
+        lambda_priv: float = 0.10,
+        lambda_gate: float = 0.05,
+    ):
+        super().__init__()
+        self.lambda_priv = lambda_priv
+        self.lambda_gate = lambda_gate
+
+        self.bce_loss_fn = MaskedBCELoss()
+        self.priv_loss_fn = PrivilegedSolutionDistillationLoss()
+        self.gate_reg_fn = ModalitySuppressionRegularizationLoss()
+
+    def forward(
+        self,
+        model_outputs: Dict[str, torch.Tensor],
+        targets: torch.Tensor,
+        loss_mask: torch.Tensor,
+        seq_mask: torch.Tensor,
+    ) -> Tuple[torch.Tensor, Dict[str, float]]:
+        """
+        Compute total multi-task loss and component metrics.
+
+        Args:
+            model_outputs: Dictionary returned by MGMMKTv2.forward().
+            targets: Binary ground-truth student correctness labels [B, L].
+            loss_mask: pyKT loss mask (step 0 excluded) [B, L].
+            seq_mask: Sequence validity mask (all active steps) [B, L].
+
+        Returns:
+            Tuple of:
+                - total_loss: Scalar multi-task loss.
+                - metrics: Dictionary of individual loss components.
+        """
+        logits = model_outputs["logits"]
+        hat_z_s = model_outputs.get("hat_z_s")
+        z_s_clean = model_outputs.get("z_s_clean")
+        alpha_q = model_outputs["alpha_q"]
+        beta_s = model_outputs["beta_s"]
+        raw_mod_masks = model_outputs.get("raw_modality_masks")
+        dyn_mod_masks = model_outputs.get("modality_masks")
+
+        # 1. Primary Knowledge Tracing BCE loss (evaluated on loss_mask)
+        l_bce = self.bce_loss_fn(logits, targets, loss_mask)
+
+        # 2. Privileged Solution Distillation loss (LUPI)
+        if self.lambda_priv > 0.0 and hat_z_s is not None and z_s_clean is not None and raw_mod_masks is not None:
+            # Solution existence indicator: max(m_txt_s^raw, m_img_s^raw) * seq_mask
+            m_sol_raw = torch.max(raw_mod_masks[..., 1], raw_mod_masks[..., 2])
+            m_sol_valid = (m_sol_raw > 0.5) & seq_mask.bool()
+            l_priv = self.priv_loss_fn(hat_z_s, z_s_clean, m_sol_valid)
+        else:
+            l_priv = torch.tensor(0.0, device=logits.device)
+
+        # 3. Modality Suppression Regularization loss
+        if self.lambda_gate > 0.0 and dyn_mod_masks is not None:
+            m_img_q = dyn_mod_masks[..., 0]
+            m_img_s = dyn_mod_masks[..., 2]
+            l_gate = self.gate_reg_fn(alpha_q, beta_s, m_img_q, m_img_s, seq_mask)
+        else:
+            l_gate = torch.tensor(0.0, device=logits.device)
+
+        total_loss = l_bce + self.lambda_priv * l_priv + self.lambda_gate * l_gate
+
+        metrics = {
+            "loss_total": total_loss.item(),
+            "loss_bce": l_bce.item(),
+            "loss_priv": l_priv.item(),
+            "loss_gate": l_gate.item(),
+        }
+        return total_loss, metrics

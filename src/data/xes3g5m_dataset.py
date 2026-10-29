@@ -231,7 +231,8 @@ class XES3G5MDataset(Dataset):
         )[idx]
 
         # Retrieve static item properties for this sequence
-        mod_mask_seq = self.modality_masks[q_seq].clone()  # [L, 3]
+        raw_mod_mask_seq = self.modality_masks[q_seq].clone()  # [L, 3] clean ground-truth mask
+        mod_mask_seq = raw_mod_mask_seq.clone()  # [L, 3] dynamic dropped mask
         leaf_kcs_seq = self.question_leaf_kcs[q_seq]  # [L, 6]
         leaf_mask_seq = self.question_kc_mask[q_seq]  # [L, 6]
         static_ctx_seq = self.question_static_ctx[q_seq]  # [L, 15]
@@ -274,6 +275,7 @@ class XES3G5MDataset(Dataset):
             "running_acc_prev": running_acc,
             "dynamic_ctx": dynamic_ctx_seq,
             "modality_masks": mod_mask_seq,
+            "raw_modality_masks": raw_mod_mask_seq,
             "leaf_kcs": leaf_kcs_seq,
             "leaf_kc_mask": leaf_mask_seq,
             "ctt_difficulty": self.ctt_difficulty[q_seq],

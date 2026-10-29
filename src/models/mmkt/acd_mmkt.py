@@ -191,35 +191,51 @@ class ACDMMKT(nn.Module):
 
     def init_static_buffers(self, static_item_bank: Dict[str, torch.Tensor]) -> None:
         """
-        Register Tier 1 static item bank tensors as persistent model buffers.
+        Register Tier 1 static item bank tensors as non-trainable non-persistent buffers.
+        Ensures automatic device transfer (CPU -> GPU/MPS) when model.to(device) is called,
+        while preventing frozen static features (>4 GB) from bloating checkpoint files.
         Preserves FP16 precision for 4.3 GB fine-grained token/patch tensors to
         minimize GPU/MPS RAM consumption.
         """
         # Fine-grained token/patch tensors explicitly stored in float16
-        self.register_buffer("acd_E_txt_q", static_item_bank["acd_E_txt_q"].half())          # [7652, 128, 768] fp16
-        self.register_buffer("acd_mask_txt_q", static_item_bank["acd_mask_txt_q"])          # [7652, 128] bool
-        self.register_buffer("acd_E_img_q", static_item_bank["acd_E_img_q"].half())          # [7652, 49, 768] fp16
-        self.register_buffer("acd_E_txt_s", static_item_bank["acd_E_txt_s"].half())          # [7652, 160, 768] fp16
-        self.register_buffer("acd_mask_txt_s", static_item_bank["acd_mask_txt_s"])          # [7652, 160] bool
-        self.register_buffer("acd_E_img_s", static_item_bank["acd_E_img_s"].half())          # [7652, 49, 768] fp16
+        self.register_buffer("acd_E_txt_q", static_item_bank["acd_E_txt_q"].half(), persistent=False)          # [7652, 128, 768] fp16
+        self.register_buffer("acd_mask_txt_q", static_item_bank["acd_mask_txt_q"], persistent=False)          # [7652, 128] bool
+        self.register_buffer("acd_E_img_q", static_item_bank["acd_E_img_q"].half(), persistent=False)          # [7652, 49, 768] fp16
+        self.register_buffer("acd_E_txt_s", static_item_bank["acd_E_txt_s"].half(), persistent=False)          # [7652, 160, 768] fp16
+        self.register_buffer("acd_mask_txt_s", static_item_bank["acd_mask_txt_s"], persistent=False)          # [7652, 160] bool
+        self.register_buffer("acd_E_img_s", static_item_bank["acd_E_img_s"].half(), persistent=False)          # [7652, 49, 768] fp16
 
         # Hypergraph structures in float32
-        self.register_buffer("acd_kc_init_emb", static_item_bank["acd_kc_init_emb"].float())      # [1175, 768]
-        self.register_buffer("acd_hypergraph_G", static_item_bank["acd_hypergraph_G"].float())    # [1175, 1175]
+        self.register_buffer("acd_kc_init_emb", static_item_bank["acd_kc_init_emb"].float(), persistent=False)      # [1175, 768]
+        self.register_buffer("acd_hypergraph_G", static_item_bank["acd_hypergraph_G"].float(), persistent=False)    # [1175, 1175]
 
         # Metadata and discrete references
-        self.register_buffer("modality_masks", static_item_bank["modality_masks"].float())        # [7652, 3]
-        self.register_buffer("question_leaf_kcs", static_item_bank["question_leaf_kcs"])          # [7652, 6]
-        self.register_buffer("question_kc_mask", static_item_bank["question_kc_mask"])            # [7652, 6]
+        self.register_buffer("modality_masks", static_item_bank["modality_masks"].float(), persistent=False)        # [7652, 3]
+        self.register_buffer("question_leaf_kcs", static_item_bank["question_leaf_kcs"], persistent=False)          # [7652, 6]
+        self.register_buffer("question_kc_mask", static_item_bank["question_kc_mask"], persistent=False)            # [7652, 6]
         if "question_static_ctx" in static_item_bank:
-            self.register_buffer("question_static_ctx", static_item_bank["question_static_ctx"].float())  # [7652, 15]
+            self.register_buffer("question_static_ctx", static_item_bank["question_static_ctx"].float(), persistent=False)  # [7652, 15]
 
         # Global pooled vectors for Ablation 3 (w/o Fine-Grained Alignment)
         if "mg_v_txt_q" in static_item_bank:
-            self.register_buffer("mg_v_txt_q", static_item_bank["mg_v_txt_q"].half())
-            self.register_buffer("mg_v_txt_s", static_item_bank["mg_v_txt_s"].half())
-            self.register_buffer("mg_v_img_q", static_item_bank["mg_v_img_q"].half())
-            self.register_buffer("mg_v_img_s", static_item_bank["mg_v_img_s"].half())
+            self.register_buffer("mg_v_txt_q", static_item_bank["mg_v_txt_q"].half(), persistent=False)
+            self.register_buffer("mg_v_txt_s", static_item_bank["mg_v_txt_s"].half(), persistent=False)
+            self.register_buffer("mg_v_img_q", static_item_bank["mg_v_img_q"].half(), persistent=False)
+            self.register_buffer("mg_v_img_s", static_item_bank["mg_v_img_s"].half(), persistent=False)
+
+    def load_state_dict(self, state_dict: Dict[str, Any], strict: bool = True):
+        """
+        Load state dict with backward compatibility for legacy checkpoints containing
+        frozen static item bank buffers.
+        """
+        static_keys = {
+            "acd_E_txt_q", "acd_mask_txt_q", "acd_E_img_q", "acd_E_txt_s", "acd_mask_txt_s",
+            "acd_E_img_s", "acd_kc_init_emb", "acd_hypergraph_G", "modality_masks",
+            "question_leaf_kcs", "question_kc_mask", "question_static_ctx",
+            "mg_v_txt_q", "mg_v_txt_s", "mg_v_img_q", "mg_v_img_s",
+        }
+        cleaned_state_dict = {k: v for k, v in state_dict.items() if k not in static_keys}
+        return super().load_state_dict(cleaned_state_dict, strict=strict)
 
 
     def forward_item_bank(

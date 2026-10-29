@@ -1,0 +1,45 @@
+# Training & Optimization Configuration for MG-MMKT v2
+val_fold: 0
+seed: 42
+data_dir: "data/processed/XES3G5M"
+save_dir: "outputs/checkpoints/mg_mmkt_v2_fold0"
+log_dir: "outputs/logs"
+
+# Sequential KT Training Hyperparameters
+batch_size: 64
+test_batch_size: 128
+num_workers: 2
+num_epochs: 50
+lr: 0.001
+weight_decay: 0.0001
+max_grad_norm: 1.0
+patience: 10
+warmup_epochs: 2
+eta_min: 0.00001
+p_drop: 0.20
+test_stride: 100
+device: "auto"
+
+# Hardware execution profiles
+profiles:
+  m1_pro:
+    device: "mps"
+    batch_size: 64
+    test_batch_size: 128
+    num_workers: 0
+    pin_memory: false
+
+  cuda_single:
+    device: "cuda:0"
+    batch_size: 64
+    test_batch_size: 128
+    num_workers: 4
+    pin_memory: true
+
+  cpu:
+    device: "cpu"
+    batch_size: 32
+    test_batch_size: 64
+    num_workers: 0
+    pin_memory: false
+

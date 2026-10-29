@@ -1,0 +1,30 @@
+# Model Architecture Hyperparameters for MG-MMKT v2
+# Masked-Gated Multimodal Knowledge Tracing with Privileged Cognitive Demand Distillation
+model_name: "mg_mmkt_v2"
+num_questions: 7652
+num_kcs: 1175
+d_raw_txt: 768
+d_raw_img: 768
+d_model: 128
+d_ffn: 256
+num_heads: 4
+max_seq_len: 200
+p_id_drop: 0.20
+dropout: 0.20
+
+# Multi-task objective loss weights
+lambda_priv: 0.10
+lambda_gate: 0.05
+
+# Ablation Study Flags (all true for full MG-MMKT v2)
+use_lupi: true                        # Ablation 2: Privileged cognitive demand distillation f_cog(x_t)
+use_dual_pathway_history: true        # Ablation 3: Dual-pathway historical interaction (Mastery vs Remedial)
+use_glu: true                         # Ablation 4a: Channel-wise GLU feature gating
+use_post_fusion_ffn: true             # Ablation 4b: Post-fusion cross-dimension residual FFN
+use_disentangled_qk: true             # Ablation 5a: Disentangled Q-K space (Q, K from x; V from y)
+use_relative_forgetting: true         # Ablation 5b: Monotonic temporal distance decay -theta_h * log(1 + t - tau)
+use_structural_decoupling: true       # Ablation 6a: Structural ID-KC decoupling + frequency gate + ID dropout
+use_kc_imputation: true               # Ablation 6b: KC-conditioned missing modality imputation inside LayerNorm
+use_solution: true                    # Master switch for solution representations
+use_visual: true                      # Master switch for visual modalities
+

@@ -154,13 +154,23 @@ class MGMMKT(nn.Module):
 
     def init_static_buffers(self, static_item_bank: Dict[str, torch.Tensor]) -> None:
         """
-        Register frozen feature tensors as non-trainable persistent model buffers.
-        Ensures automatic device transfer (CPU -> GPU/MPS) when model.to(device) is called.
+        Register frozen feature tensors as non-trainable non-persistent model buffers.
+        Ensures automatic device transfer (CPU -> GPU/MPS) when model.to(device) is called,
+        while preventing frozen static features (~90 MB) from bloating checkpoint files.
         """
-        self.register_buffer("v_txt_q_bank", static_item_bank["mg_v_txt_q"].float())
-        self.register_buffer("v_img_q_bank", static_item_bank["mg_v_img_q"].float())
-        self.register_buffer("v_txt_s_bank", static_item_bank["mg_v_txt_s"].float())
-        self.register_buffer("v_img_s_bank", static_item_bank["mg_v_img_s"].float())
+        self.register_buffer("v_txt_q_bank", static_item_bank["mg_v_txt_q"].float(), persistent=False)
+        self.register_buffer("v_img_q_bank", static_item_bank["mg_v_img_q"].float(), persistent=False)
+        self.register_buffer("v_txt_s_bank", static_item_bank["mg_v_txt_s"].float(), persistent=False)
+        self.register_buffer("v_img_s_bank", static_item_bank["mg_v_img_s"].float(), persistent=False)
+
+    def load_state_dict(self, state_dict: Dict[str, Any], strict: bool = True):
+        """
+        Load state dict with backward compatibility for legacy checkpoints containing
+        frozen static item bank buffers.
+        """
+        static_keys = {"v_txt_q_bank", "v_img_q_bank", "v_txt_s_bank", "v_img_s_bank"}
+        cleaned_state_dict = {k: v for k, v in state_dict.items() if k not in static_keys}
+        return super().load_state_dict(cleaned_state_dict, strict=strict)
 
     def _pool_kc_embeddings(
         self,
