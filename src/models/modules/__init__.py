@@ -27,6 +27,20 @@ from src.models.modules.disentangled_causal_attention import (
     DisentangledCausalAttention,
     MultiInteractiveReadout,
 )
+from src.models.modules.symmetric_cross_modal_aligner import (
+    SingleBranchAligner,
+    SymmetricCrossModalAligner,
+)
+from src.models.modules.additive_rasch_hypergraph import (
+    HypergraphConceptEncoder,
+    AdditiveRaschHypergraph,
+)
+from src.models.modules.asymmetric_monotonic_retriever import (
+    AsymmetricMonotonicRetriever,
+)
+from src.models.modules.monotonic_2pl_irt import (
+    Monotonic2PLIRT,
+)
 
 __all__ = [
     "ModalityImputationLayer",
@@ -44,4 +58,10 @@ __all__ = [
     "CognitiveHistoryFusionLayer",
     "DisentangledCausalAttention",
     "MultiInteractiveReadout",
+    "SingleBranchAligner",
+    "SymmetricCrossModalAligner",
+    "HypergraphConceptEncoder",
+    "AdditiveRaschHypergraph",
+    "AsymmetricMonotonicRetriever",
+    "Monotonic2PLIRT",
 ]

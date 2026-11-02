@@ -25,6 +25,7 @@ from collections import Counter
 from typing import Dict, Any, List
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 # Ensure project root is in sys.path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))

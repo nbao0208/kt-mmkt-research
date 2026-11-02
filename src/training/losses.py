@@ -47,7 +47,7 @@ class MaskedBCELoss(nn.Module):
             Scalar loss tensor normalized by valid interaction count.
         """
         loss_unreduced = F.binary_cross_entropy_with_logits(
-            logits,
+            logits.float(),
             targets.float(),
             reduction="none",
         )
@@ -547,3 +547,148 @@ class MGMMKTv2Loss(nn.Module):
             "loss_gate": l_gate.item(),
         }
         return total_loss, metrics
+
+
+class BayesianWeightedDifficultyLoss(nn.Module):
+    """
+    Bayesian Sample-Size Weighted Difficulty Calibration Loss (L_D^weighted).
+    Implements Section 4.1 in docs/models/ACD-MMKTv2.md:
+        omega_q = N_q / (N_q + kappa)
+        L_D^weighted = (1 / |Q|) sum_{q in Q} omega_q * (BCE_logits(tilde_mu_q, D_q) - H(D_q))
+    Normalized so that the optimal loss is 0.0 when sigmoid(tilde_mu_q) == D_q.
+    """
+
+    def __init__(self, kappa: float = 10.0):
+        super().__init__()
+        self.kappa = kappa
+
+    def forward(
+        self,
+        logit_mu: torch.Tensor,
+        d_err: torch.Tensor,
+        n_obs: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Compute weighted difficulty calibration loss.
+
+        Args:
+            logit_mu: Model predicted difficulty logits [M].
+            d_err: Empirical CTT error rates in [0, 1] [M].
+            n_obs: Interaction attempt sample sizes N_q >= 0 [M].
+
+        Returns:
+            Scalar weighted calibration loss.
+        """
+        flat_logits = logit_mu.reshape(-1).float()
+        flat_targets = d_err.reshape(-1).float()
+        flat_n = n_obs.reshape(-1).float()
+
+        if len(flat_logits) == 0:
+            return torch.tensor(0.0, device=logit_mu.device, requires_grad=True)
+
+        # Bayesian confidence weight omega_q = N_q / (N_q + kappa)
+        omega = flat_n / (flat_n + self.kappa)  # [M] in [0, 1)
+
+        # Numerically stable BCE with logits against soft empirical targets
+        bce = F.binary_cross_entropy_with_logits(
+            flat_logits, flat_targets, reduction="none"
+        )
+
+        # Target entropy H(D_q) with safe clamping
+        eps = 1e-7
+        p = flat_targets.clamp(min=eps, max=1.0 - eps)
+        target_entropy = -(p * torch.log(p) + (1.0 - p) * torch.log(1.0 - p))
+
+        # Shifted so that optimal loss is 0.0 and clamp to non-negative
+        shifted_loss = torch.clamp(bce - target_entropy, min=0.0)
+        weighted_loss = omega * shifted_loss
+
+        return weighted_loss.mean()
+
+
+class ACDMMKTv2Loss(nn.Module):
+    """
+    Multi-Task Loss Objective for ACD-MMKTv2.
+    Combines:
+    1. Primary pyKT sequential prediction BCE loss (L_BCE) on active interactions (loss_mask).
+    2. Bayesian sample-size weighted difficulty calibration loss (L_D^weighted) on unique items.
+    L_ACD = L_BCE + beta_D * L_D^weighted.
+    """
+
+    def __init__(self, beta_d: float = 0.20, kappa: float = 10.0):
+        """
+        Initialize ACDMMKTv2Loss.
+
+        Args:
+            beta_d: Weight for difficulty calibration loss (default: 0.20).
+            kappa: Bayesian sample size smoothing constant (default: 10.0).
+        """
+        super().__init__()
+        self.beta_d = beta_d
+        self.bce_loss_fn = MaskedBCELoss()
+        self.diff_loss_fn = BayesianWeightedDifficultyLoss(kappa=kappa)
+
+    def forward_stage1(
+        self,
+        tilde_mu: torch.Tensor,
+        d_err: torch.Tensor,
+        n_obs: torch.Tensor,
+    ) -> Tuple[torch.Tensor, Dict[str, float]]:
+        """
+        Stage 1 loss: Pure item-bank pre-training on L_D^weighted.
+        """
+        diff_loss = self.diff_loss_fn(tilde_mu, d_err, n_obs)
+        total_loss = self.beta_d * diff_loss
+
+        metrics = {
+            "loss_total": total_loss.item(),
+            "loss_diff": diff_loss.item(),
+        }
+        return total_loss, metrics
+
+    def forward(
+        self,
+        model_outputs: Dict[str, torch.Tensor],
+        targets: torch.Tensor,
+        loss_mask: torch.Tensor,
+        n_q_all: torch.Tensor,
+        d_q_all: torch.Tensor,
+    ) -> Tuple[torch.Tensor, Dict[str, float]]:
+        """
+        Stage 2 multi-task loss.
+
+        Args:
+            model_outputs: Output dictionary from ACDMMKTv2.forward().
+            targets: Binary student response targets [B, L].
+            loss_mask: Evaluation / loss mask (step 0 excluded) [B, L].
+            n_q_all: Full fold sample size array [7652].
+            d_q_all: Full fold empirical error rate array [7652].
+
+        Returns:
+            Tuple of (total_loss, metrics_dict).
+        """
+        logits = model_outputs["logits"]
+
+        # 1. Primary Knowledge Tracing BCE loss
+        l_bce = self.bce_loss_fn(logits, targets, loss_mask)
+
+        # 2. Bayesian weighted difficulty calibration loss on unique active questions
+        active_q = model_outputs.get("active_unique_q")
+        active_tilde_mu = model_outputs.get("active_unique_tilde_mu")
+
+        if active_q is not None and len(active_q) > 0 and active_tilde_mu is not None and self.beta_d > 0.0:
+            target_n = n_q_all[active_q]
+            target_d = d_q_all[active_q]
+            l_diff = self.diff_loss_fn(active_tilde_mu, target_d, target_n)
+        else:
+            l_diff = torch.tensor(0.0, device=logits.device)
+
+        total_loss = l_bce + self.beta_d * l_diff
+
+        metrics = {
+            "loss_total": total_loss.item(),
+            "loss_bce": l_bce.item(),
+            "loss_diff": l_diff.item(),
+        }
+        return total_loss, metrics
+

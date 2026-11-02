@@ -81,14 +81,24 @@ def load_static_item_bank_optimized(
     full_path = os.path.join(processed_dir, "static_item_bank.pt")
     mg_path = os.path.join(processed_dir, "mg_static_item_bank.pt")
 
-    if model_type.lower() == "acd_mmkt":
+    if model_type.lower() in ("acd_mmkt", "acd_mmkt_v2"):
         if os.path.exists(full_path):
             try:
                 # Use mmap=True to avoid loading 4.5 GB into physical CPU RAM
-                return torch.load(full_path, mmap=True, map_location="cpu")
+                bank = torch.load(full_path, mmap=True, map_location="cpu")
             except Exception:
-                return torch.load(full_path, map_location="cpu")
-        raise FileNotFoundError(f"Full static item bank not found at {full_path} for acd_mmkt")
+                bank = torch.load(full_path, map_location="cpu")
+
+            # Load auxiliary metadata if available in processed_dir
+            aux_path = os.path.join(processed_dir, "acd_v2_aux_metadata.pt")
+            if os.path.exists(aux_path):
+                aux_data = torch.load(aux_path, map_location="cpu")
+                if isinstance(bank, dict):
+                    bank["N_q_folds"] = aux_data.get("N_q_folds")
+                    bank["D_q_folds"] = aux_data.get("D_q_folds")
+                    bank["omega_q_folds"] = aux_data.get("omega_q_folds")
+            return bank
+        raise FileNotFoundError(f"Full static item bank not found at {full_path} for {model_type}")
 
     if os.path.exists(mg_path):
         return torch.load(mg_path, map_location="cpu")
@@ -113,6 +123,7 @@ class XES3G5MDataset(Dataset):
         is_train: bool = True,
         p_drop: float = 0.20,
         eval_mask: Optional[torch.Tensor] = None,
+        data_dir: Optional[str] = None,
     ):
         """
         Initialize XES3G5MDataset.
@@ -125,6 +136,7 @@ class XES3G5MDataset(Dataset):
             is_train: Whether dataset is in training mode (enables Modality Dropout).
             p_drop: Probability of dropping solution modalities during training (default: 0.20).
             eval_mask: Optional custom evaluation mask tensor [N_seq, L] (e.g. for strided test evaluation).
+            data_dir: Optional root directory path containing processed datasets and aux metadata.
         """
         super().__init__()
         self.model_type = model_type.lower()
@@ -168,6 +180,41 @@ class XES3G5MDataset(Dataset):
             self.ctt_difficulty = torch.zeros(7652, dtype=torch.float32)
             self.ctt_valid_mask = torch.zeros(7652, dtype=torch.bool)
 
+        # Auxiliary metadata for ACD-MMKTv2 (N_q, D_q, omega_q)
+        aux_loaded = False
+        if "N_q_folds" in bank_dict and bank_dict["N_q_folds"] is not None:
+            self.N_q = bank_dict["N_q_folds"][self.fold]
+            self.D_q = bank_dict["D_q_folds"][self.fold]
+            self.omega_q = bank_dict["omega_q_folds"][self.fold]
+            aux_loaded = True
+        elif data_dir and os.path.exists(os.path.join(data_dir, "acd_v2_aux_metadata.pt")):
+            aux_data = torch.load(os.path.join(data_dir, "acd_v2_aux_metadata.pt"), map_location="cpu")
+            self.N_q = aux_data["N_q_folds"][self.fold]
+            self.D_q = aux_data["D_q_folds"][self.fold]
+            self.omega_q = aux_data["omega_q_folds"][self.fold]
+            aux_loaded = True
+        elif isinstance(static_item_bank, str) and os.path.isdir(static_item_bank):
+            aux_file = os.path.join(static_item_bank, "acd_v2_aux_metadata.pt")
+            if os.path.exists(aux_file):
+                aux_data = torch.load(aux_file, map_location="cpu")
+                self.N_q = aux_data["N_q_folds"][self.fold]
+                self.D_q = aux_data["D_q_folds"][self.fold]
+                self.omega_q = aux_data["omega_q_folds"][self.fold]
+                aux_loaded = True
+
+        if not aux_loaded:
+            # Fallback path
+            fallback_aux = os.path.join("data", "processed", "XES3G5M", "acd_v2_aux_metadata.pt")
+            if os.path.exists(fallback_aux):
+                aux_data = torch.load(fallback_aux, map_location="cpu")
+                self.N_q = aux_data["N_q_folds"][self.fold]
+                self.D_q = aux_data["D_q_folds"][self.fold]
+                self.omega_q = aux_data["omega_q_folds"][self.fold]
+            else:
+                self.N_q = torch.zeros(7652, dtype=torch.int64)
+                self.D_q = torch.zeros(7652, dtype=torch.float32)
+                self.omega_q = torch.zeros(7652, dtype=torch.float32)
+
         # Retain only lightweight item metadata (<1 MB) so del static_item_bank can truly free the 4.3 GB dictionary
         self.static_item_bank = {
             "modality_masks": self.modality_masks,
@@ -176,6 +223,9 @@ class XES3G5MDataset(Dataset):
             "question_static_ctx": self.question_static_ctx,
             "ctt_difficulty": self.ctt_difficulty,
             "ctt_valid_mask": self.ctt_valid_mask,
+            "N_q": self.N_q,
+            "D_q": self.D_q,
+            "omega_q": self.omega_q,
         }
 
         # Precompute or assign loss masks and evaluation masks
@@ -237,13 +287,21 @@ class XES3G5MDataset(Dataset):
         leaf_mask_seq = self.question_kc_mask[q_seq]  # [L, 6]
         static_ctx_seq = self.question_static_ctx[q_seq]  # [L, 15]
 
-        # Apply Dynamic Modality Dropout during training (p_drop on solution modalities)
+        # Apply Dynamic Modality Dropout during training
         if self.is_train and self.p_drop > 0.0:
-            # Independent Bernoulli mask per step
-            drop_sample = torch.rand(self.max_seq_len) >= self.p_drop  # True with prob 1 - p_drop
-            # If dropped, solution text and solution image are masked out
-            mod_mask_seq[:, 1] = mod_mask_seq[:, 1] * drop_sample.float()
-            mod_mask_seq[:, 2] = mod_mask_seq[:, 2] * drop_sample.float()
+            if self.model_type == "acd_mmkt_v2":
+                # ACD-MMKTv2 Constraint 1: Text is 100% preserved. Only visual channels dropped.
+                drop_q = (torch.rand(self.max_seq_len) >= self.p_drop).float()
+                drop_s = (torch.rand(self.max_seq_len) >= self.p_drop).float()
+                mod_mask_seq[:, 0] = mod_mask_seq[:, 0] * drop_q  # stem image
+                # mod_mask_seq[:, 1] is solution text: NEVER DROPPED (1.0)
+                mod_mask_seq[:, 2] = mod_mask_seq[:, 2] * drop_s  # solution image
+            else:
+                # Independent Bernoulli mask per step for solution modalities
+                drop_sample = torch.rand(self.max_seq_len) >= self.p_drop  # True with prob 1 - p_drop
+                # If dropped, solution text and solution image are masked out
+                mod_mask_seq[:, 1] = mod_mask_seq[:, 1] * drop_sample.float()
+                mod_mask_seq[:, 2] = mod_mask_seq[:, 2] * drop_sample.float()
 
         # Build dynamic context vector (21 dimensions: 15 static + 4 dynamic temporal/proficiency + 2 solution presence flags)
         dynamic_ctx_seq = torch.cat(
@@ -280,6 +338,9 @@ class XES3G5MDataset(Dataset):
             "leaf_kc_mask": leaf_mask_seq,
             "ctt_difficulty": self.ctt_difficulty[q_seq],
             "ctt_valid_mask": self.ctt_valid_mask[q_seq],
+            "N_q": self.N_q[q_seq],
+            "D_q": self.D_q[q_seq],
+            "omega_q": self.omega_q[q_seq],
         }
 
         return item
@@ -484,6 +545,7 @@ def get_xes3g5m_dataloaders(
         fold=val_fold,
         is_train=True,
         p_drop=p_drop,
+        data_dir=data_dir,
     )
 
     # 2. Validation set: designated validation fold with is_train=False
@@ -495,6 +557,7 @@ def get_xes3g5m_dataloaders(
         fold=val_fold,
         is_train=False,
         p_drop=0.0,
+        data_dir=data_dir,
     )
 
     # 3. Test set: Strided context windows on sequences_test.pt
@@ -513,6 +576,7 @@ def get_xes3g5m_dataloaders(
         is_train=False,
         p_drop=0.0,
         eval_mask=test_eval_mask,
+        data_dir=data_dir,
     )
 
     # Instantiate DataLoaders
