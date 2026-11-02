@@ -237,19 +237,22 @@ def build_text_and_image_metadata(
 def main():
     parser = argparse.ArgumentParser(description="Prepare ACD-MMKTv2 Auxiliary Metadata")
     parser.add_argument(
-        "--data_dir",
+        "--data-dir", "--data_dir",
+        dest="data_dir",
         type=str,
         default="data/processed/XES3G5M",
         help="Path to processed data directory",
     )
     parser.add_argument(
-        "--raw_dir",
+        "--raw-dir", "--raw_dir",
+        dest="raw_dir",
         type=str,
         default="data/raw/XES3G5M",
         help="Path to raw data directory",
     )
     parser.add_argument(
-        "--output_file",
+        "--output-file", "--output_file",
+        dest="output_file",
         type=str,
         default="data/processed/XES3G5M/acd_v2_aux_metadata.pt",
         help="Output path for auxiliary metadata .pt file",
@@ -263,11 +266,12 @@ def main():
     args = parser.parse_args()
 
     os.makedirs(os.path.dirname(os.path.abspath(args.output_file)), exist_ok=True)
+    num_questions = 7652
 
     # 1. Compute N_q and D_q across 5 folds
     N_q_folds, D_q_folds, omega_q_folds = compute_per_fold_item_statistics(
         data_dir=args.data_dir,
-        num_questions=7652,
+        num_questions=num_questions,
         kappa=args.kappa,
     )
 
@@ -282,15 +286,15 @@ def main():
 
     if not os.path.exists(questions_json_path):
         print(f"⚠️ Raw metadata '{questions_json_path}' not found. Generating fallback token maps for {num_questions} questions.")
-        token_to_word_q = [[f"[T{i}]" for i in range(128)] for _ in range(7652)]
-        token_to_word_s = [[f"[T{i}]" for i in range(160)] for _ in range(7652)]
-        image_meta_q = [{} for _ in range(7652)]
-        image_meta_s = [{} for _ in range(7652)]
+        token_to_word_q = [[f"[T{i}]" for i in range(128)] for _ in range(num_questions)]
+        token_to_word_s = [[f"[T{i}]" for i in range(160)] for _ in range(num_questions)]
+        image_meta_q = [{} for _ in range(num_questions)]
+        image_meta_s = [{} for _ in range(num_questions)]
     else:
         token_to_word_q, token_to_word_s, image_meta_q, image_meta_s = build_text_and_image_metadata(
             raw_metadata_path=questions_json_path,
             images_dir=images_dir,
-            num_questions=7652,
+            num_questions=num_questions,
         )
 
     # 3. Package and save
