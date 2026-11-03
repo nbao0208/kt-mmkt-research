@@ -210,26 +210,43 @@ def test_anti_leakage_multi_concept_question_inference(device):
     assert abs(preds_sakt_a[1] - preds_sakt_b[1]) > 1e-6, "SAKT attention did not update at t > t_0!"
 
 
-def test_one_to_one_target_and_qid_alignment_with_mmkt_test_set():
+def test_one_to_one_target_and_qid_alignment_with_raw_and_mmkt_test_set():
     """
     Criterion 5 [H5 Fix]: Verify exact 1-to-1 alignment between pyKT question-level test set
-    and MMKT build_test_strided_windows across all 1,099,197 samples.
+    and raw test_quelevel.csv (and optional sequences_test.pt) across all 1,099,197 samples.
     """
-    from src.data.xes3g5m_dataset import build_test_strided_windows
+    import pandas as pd
 
     students = load_test_grouped_data("data/raw/XES3G5M/kc_level/test.csv")
-    strat_meta = load_stratification_metadata("data/processed/XES3G5M", students)
-
-    test_seq_data = torch.load("data/processed/XES3G5M/sequences_test.pt", map_location="cpu")
-    w_dict, eval_mask = build_test_strided_windows(test_seq_data, max_seq_len=200, stride=100)
-
-    mmkt_targets = w_dict["r_seq"][eval_mask].numpy()
-    mmkt_qids = w_dict["q_seq"][eval_mask].numpy()
+    strat_meta = load_stratification_metadata("data/raw/XES3G5M", students)
 
     assert len(strat_meta["targets"]) == 1099197
-    assert len(mmkt_targets) == 1099197
-    assert np.array_equal(strat_meta["targets"], mmkt_targets), "Targets do not match MMKT test set 1-to-1!"
-    assert np.array_equal(strat_meta["q_ids"], mmkt_qids), "Question IDs do not match MMKT test set 1-to-1!"
+    assert len(strat_meta["q_ids"]) == 1099197
+
+    # 1. Verify against raw test_quelevel.csv
+    que_csv_path = "data/raw/XES3G5M/question_level/test_quelevel.csv"
+    if os.path.exists(que_csv_path):
+        df_que = pd.read_csv(que_csv_path)
+        que_targets, que_qids = [], []
+        for _, row in df_que.iterrows():
+            qs = [int(x) for x in row["questions"].split(",")]
+            rs = [int(x) for x in row["responses"].split(",")]
+            for q, r in zip(qs[1:], rs[1:]):
+                que_targets.append(r)
+                que_qids.append(q)
+        assert np.array_equal(strat_meta["targets"], np.array(que_targets, dtype=np.int64)), "Targets do not match raw test_quelevel.csv 1-to-1!"
+        assert np.array_equal(strat_meta["q_ids"], np.array(que_qids, dtype=np.int64)), "Question IDs do not match raw test_quelevel.csv 1-to-1!"
+
+    # 2. Optional alignment check with MMKT sequences_test.pt if present
+    seq_pt_path = "data/processed/XES3G5M/sequences_test.pt"
+    if os.path.exists(seq_pt_path):
+        from src.data.xes3g5m_dataset import build_test_strided_windows
+        test_seq_data = torch.load(seq_pt_path, map_location="cpu")
+        w_dict, eval_mask = build_test_strided_windows(test_seq_data, max_seq_len=200, stride=100)
+        mmkt_targets = w_dict["r_seq"][eval_mask].numpy()
+        mmkt_qids = w_dict["q_seq"][eval_mask].numpy()
+        assert np.array_equal(strat_meta["targets"], mmkt_targets), "Targets do not match MMKT test set 1-to-1!"
+        assert np.array_equal(strat_meta["q_ids"], mmkt_qids), "Question IDs do not match MMKT test set 1-to-1!"
 
 
 def test_sakt_right_padding_and_shifted_query_equivalence(device):

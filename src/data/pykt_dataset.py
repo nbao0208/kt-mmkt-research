@@ -8,6 +8,8 @@ Provides:
 """
 
 import os
+import re
+import json
 from typing import Dict, Any, List, Tuple, Optional
 from collections import Counter
 import pandas as pd
@@ -176,11 +178,13 @@ def load_test_grouped_data(
 
 
 def load_stratification_metadata(
-    processed_dir: str = "data/processed/XES3G5M",
+    raw_data_dir: str = "data/raw/XES3G5M",
     test_grouped_students: Optional[List[Dict[str, Any]]] = None,
+    processed_dir: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
-    Extract stratification metadata aligned with the 1,099,197 evaluated test interactions.
+    Extract stratification metadata aligned with the 1,099,197 evaluated test interactions,
+    sourced directly from raw XES3G5M data without requiring MMKT processed tensors.
 
     Provides:
     - 'targets': np.ndarray of ground truth binary labels (length 1,099,197).
@@ -191,39 +195,65 @@ def load_stratification_metadata(
     - 'train_question_counts': Dict mapping question ID to occurrence count in training set.
 
     Args:
-        processed_dir: Directory containing processed XES3G5M tensors.
+        raw_data_dir: Directory containing raw XES3G5M data (kc_level/, metadata/).
         test_grouped_students: Optional pre-loaded grouped student data.
+        processed_dir: Optional legacy fallback directory for processed MMKT tensors.
 
     Returns:
         Dictionary of aligned stratification arrays and count dictionary.
     """
     if test_grouped_students is None:
-        test_grouped_students = load_test_grouped_data()
+        test_csv_path = os.path.join(raw_data_dir, "kc_level", "test.csv")
+        test_grouped_students = load_test_grouped_data(test_csv_path)
 
-    # [M1 Fix] Prioritize loading the lightweight mg_static_item_bank.pt (46 MB) instead of
-    # the heavy static_item_bank.pt (4.3 GB) to save RAM and initialization time.
-    mg_bank_path = os.path.join(processed_dir, "mg_static_item_bank.pt")
-    full_bank_path = os.path.join(processed_dir, "static_item_bank.pt")
+    # 1. Extract question and solution image indicators directly from raw metadata/questions.json
+    q_meta_path = os.path.join(raw_data_dir, "metadata", "questions.json")
+    has_stem_img_map: Dict[int, float] = {}
+    has_sol_img_map: Dict[int, float] = {}
 
-    if os.path.exists(mg_bank_path):
-        item_bank = torch.load(mg_bank_path, map_location="cpu")
-    elif os.path.exists(full_bank_path):
-        item_bank = torch.load(full_bank_path, map_location="cpu")
-    else:
-        raise FileNotFoundError(f"Neither {mg_bank_path} nor {full_bank_path} found!")
+    if os.path.exists(q_meta_path):
+        img_ref_regex = re.compile(r"((?:question|analysis)_\d+-image_\d+)(?:\.png)?")
+        with open(q_meta_path, "r", encoding="utf-8") as f:
+            questions_raw = json.load(f)
 
-    # Modality masks: shape [N_q, 3] -> column 0: question image, column 2: solution image
-    modality_masks = item_bank.get("modality_masks", item_bank.get("mod_mask"))
+        for qid_str, q_info in questions_raw.items():
+            qid = int(qid_str)
+            content = q_info.get("content", "")
+            opts = q_info.get("options", {})
+            opt_str = " ".join(str(v) for v in opts.values()) if isinstance(opts, dict) else ""
+            analysis = q_info.get("analysis", "")
 
-    # Extract train question counts across folds
+            has_stem = 1.0 if len(img_ref_regex.findall(content + " " + opt_str)) > 0 else 0.0
+            has_sol = 1.0 if len(img_ref_regex.findall(analysis)) > 0 else 0.0
+            has_stem_img_map[qid] = has_stem
+            has_sol_img_map[qid] = has_sol
+    elif processed_dir and os.path.exists(os.path.join(processed_dir, "mg_static_item_bank.pt")):
+        bank = torch.load(os.path.join(processed_dir, "mg_static_item_bank.pt"), map_location="cpu")
+        m_masks = bank.get("modality_masks", bank.get("mod_mask"))
+        for qid in range(len(m_masks)):
+            has_stem_img_map[qid] = float(m_masks[qid, 0].item())
+            has_sol_img_map[qid] = float(m_masks[qid, 2].item())
+
+    # 2. Extract training question frequencies directly from raw kc_level/train_valid_sequences.csv
     train_counts: Counter = Counter()
-    for f in range(5):
-        fold_file = os.path.join(processed_dir, f"sequences_fold_{f}.pt")
-        if os.path.exists(fold_file):
-            f_data = torch.load(fold_file, map_location="cpu")
-            valid_mask = f_data["seq_mask"]
-            valid_qs = f_data["q_seq"][valid_mask].tolist()
-            train_counts.update(valid_qs)
+    raw_seq_csv = os.path.join(raw_data_dir, "kc_level", "train_valid_sequences.csv")
+
+    if os.path.exists(raw_seq_csv):
+        df_train = pd.read_csv(raw_seq_csv)
+        for _, row in df_train.iterrows():
+            qs = [int(x) for x in row["questions"].split(",")]
+            repeats = [int(x) for x in row["is_repeat"].split(",")]
+            for q, rep in zip(qs, repeats):
+                if rep == 0:
+                    train_counts[q] += 1
+    elif processed_dir:
+        for f in range(5):
+            fold_file = os.path.join(processed_dir, f"sequences_fold_{f}.pt")
+            if os.path.exists(fold_file):
+                f_data = torch.load(fold_file, map_location="cpu")
+                valid_mask = f_data["seq_mask"]
+                valid_qs = f_data["q_seq"][valid_mask].tolist()
+                train_counts.update(valid_qs)
 
     targets_list = []
     q_ids_list = []
@@ -241,19 +271,15 @@ def load_stratification_metadata(
             q_id = cur_q["q_id"]
             resp = cur_q["response"]
             prev_resp = prev_q["response"]
-
-            # Question image presence
-            has_q_img = float(modality_masks[q_id, 0].item()) if modality_masks is not None else 0.0
-
-            # Prior question solution image presence
             prev_q_id = prev_q["q_id"]
-            has_prev_s_img = float(modality_masks[prev_q_id, 2].item()) if modality_masks is not None else 0.0
+
+            has_q_img = has_stem_img_map.get(q_id, 0.0)
+            has_prev_s_img = has_sol_img_map.get(prev_q_id, 0.0)
 
             targets_list.append(resp)
             q_ids_list.append(q_id)
             m_img_q_list.append(has_q_img)
             prev_m_img_s_list.append(has_prev_s_img)
-            # [L2 Fix] Precompute remedial flag (remedial after incorrect: prev_resp == 0)
             remedial_mask_list.append(prev_resp == 0)
 
     return {

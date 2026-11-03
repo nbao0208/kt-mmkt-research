@@ -1,7 +1,7 @@
-# Dataset Configuration for pyKT Baselines on XES3G5M
+# Dataset Configuration for pyKT Baselines on XES3G5M (Purely Raw Data)
 dataset_name: "XES3G5M"
 raw_data_dir: "data/raw/XES3G5M/kc_level"
-processed_dir: "data/processed/XES3G5M"
+raw_root_dir: "data/raw/XES3G5M"
 train_valid_file: "train_valid_sequences.csv"
 test_file: "test.csv"
 test_question_window_file: "test_question_window_sequences.csv"

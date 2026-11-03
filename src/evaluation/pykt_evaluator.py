@@ -30,8 +30,9 @@ class PyKTEvaluator:
 
     def __init__(
         self,
-        processed_dir: str = "data/processed/XES3G5M",
-        test_csv_path: str = "data/raw/XES3G5M/kc_level/test.csv",
+        raw_data_dir: str = "data/raw/XES3G5M",
+        test_csv_path: Optional[str] = None,
+        processed_dir: Optional[str] = None,
         device: Optional[torch.device] = None,
         logger: Optional[Any] = None,
     ):
@@ -39,13 +40,15 @@ class PyKTEvaluator:
         Initialize the evaluator.
 
         Args:
-            processed_dir: Directory containing processed XES3G5M tensors.
-            test_csv_path: Path to kc_level/test.csv.
+            raw_data_dir: Directory containing raw XES3G5M files (kc_level/, metadata/).
+            test_csv_path: Optional path to kc_level/test.csv.
+            processed_dir: Optional legacy fallback directory for processed MMKT tensors.
             device: Target evaluation device.
             logger: Custom logger instance.
         """
+        self.raw_data_dir = raw_data_dir
+        self.test_csv_path = test_csv_path or os.path.join(raw_data_dir, "kc_level", "test.csv")
         self.processed_dir = processed_dir
-        self.test_csv_path = test_csv_path
         self.logger = logger or get_logger("PyKTEvaluator")
 
         if device is None:
@@ -61,11 +64,12 @@ class PyKTEvaluator:
         sync_pykt_device(self.device)
 
         # Preload student grouped test sequences and stratification metadata
-        self.logger.info("Loading test student sequences and stratification metadata...")
+        self.logger.info("Loading test student sequences and stratification metadata from raw XES3G5M...")
         self.test_students = load_test_grouped_data(self.test_csv_path)
         self.strat_meta = load_stratification_metadata(
-            processed_dir=self.processed_dir,
+            raw_data_dir=self.raw_data_dir,
             test_grouped_students=self.test_students,
+            processed_dir=self.processed_dir,
         )
         self.ground_truth_targets = self.strat_meta["targets"]
         assert len(self.ground_truth_targets) == 1099197, (

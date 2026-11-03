@@ -369,12 +369,14 @@ def main():
 
     logger.info(f"Evaluation device: {device}")
 
-    processed_dir = dataset_cfg.get("processed_dir", "data/processed/XES3G5M")
-    test_csv_path = dataset_cfg.get("test_csv_path", "data/raw/XES3G5M/kc_level/test.csv")
+    raw_data_dir = dataset_cfg.get("raw_root_dir", "data/raw/XES3G5M")
+    test_csv_path = dataset_cfg.get("test_csv_path", os.path.join(raw_data_dir, "kc_level", "test.csv"))
+    processed_dir = dataset_cfg.get("processed_dir", None)
 
     evaluator = PyKTEvaluator(
-        processed_dir=processed_dir,
+        raw_data_dir=raw_data_dir,
         test_csv_path=test_csv_path,
+        processed_dir=processed_dir,
         device=device,
         logger=logger,
     )
