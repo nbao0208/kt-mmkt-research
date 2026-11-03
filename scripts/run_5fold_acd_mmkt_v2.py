@@ -57,13 +57,14 @@ def parse_args():
     parser.add_argument("--num-epochs", type=int, default=None, help="Number of Stage 2 epochs per fold")
     parser.add_argument("--batch-size", type=int, default=None, help="Mini-batch size")
     parser.add_argument("--lr", type=float, default=None, help="Learning rate")
-    parser.add_argument("--device", type=str, default="auto", help="Compute device ('cuda', 'mps', 'cpu', or 'auto')")
+    parser.add_argument("--device", type=str, default="auto", help="Compute device ('cuda', 'xla', 'mps', 'cpu', or 'auto')")
     parser.add_argument("--dual-gpu", action="store_true", help="Enable Dual-GPU scheduling (cuda:0 folds 0,1,2 + cuda:1 folds 3,4)")
+    parser.add_argument("--multi-tpu", action="store_true", help="Enable Multi-TPU core parallel execution across folds (TPU v5e-8)")
     parser.add_argument("--checkpoint-dir", type=str, default="outputs/checkpoints", help="Base directory for checkpoints")
     parser.add_argument("--output-report-dir", type=str, default="outputs/reports", help="Directory for summary reports")
     parser.add_argument("--eval-only", action="store_true", help="Only evaluate existing fold checkpoints without retraining")
     parser.add_argument("--skip-stage1", action="store_true", help="Skip Stage 1 pre-training")
-    parser.add_argument("--profile", type=str, choices=["m1_pro", "dual_gpu_5060ti", "dual_gpu_3060", "kaggle_t4"], default=None, help="Hardware profile")
+    parser.add_argument("--profile", type=str, choices=["m1_pro", "dual_gpu_5060ti", "dual_gpu_3060", "kaggle_t4", "kaggle_tpu_v5e"], default=None, help="Hardware profile")
     parser.add_argument("--num-workers", type=int, default=None, help="Number of DataLoader workers")
     parser.add_argument("--grad-accum-steps", type=int, default=None, help="Gradient accumulation steps")
     parser.add_argument("--precision", type=str, choices=["fp32", "amp_fp16", "amp_bf16"], default=None, help="Compute precision")
@@ -250,8 +251,59 @@ def main():
         model_cfg["use_stage1_pretrain"] = False
         ablation_suffix = "_wo_stage1"
 
+    # Multi-TPU Core Dispatch (Kaggle TPU v5e-8 has 8 cores: run folds 0,1,2,3,4 in parallel)
+    if args.multi_tpu and not args.worker_only:
+        logger.info("Initializing Asynchronous Multi-TPU Core Execution across Folds 0..4...")
+        cmd_base = [sys.executable, sys.argv[0], "--worker-only"]
+        if args.config_model:
+            cmd_base.extend(["--config-model", args.config_model])
+        if args.config_train:
+            cmd_base.extend(["--config-train", args.config_train])
+        if args.config_dataset:
+            cmd_base.extend(["--config-dataset", args.config_dataset])
+        if args.checkpoint_dir:
+            cmd_base.extend(["--checkpoint-dir", args.checkpoint_dir])
+        if args.output_report_dir:
+            cmd_base.extend(["--output-report-dir", args.output_report_dir])
+        if args.num_epochs is not None:
+            cmd_base.extend(["--num-epochs", str(args.num_epochs)])
+        if args.batch_size is not None:
+            cmd_base.extend(["--batch-size", str(args.batch_size)])
+        if args.lr is not None:
+            cmd_base.extend(["--lr", str(args.lr)])
+        if args.grad_accum_steps is not None:
+            cmd_base.extend(["--grad-accum-steps", str(args.grad_accum_steps)])
+        if args.precision is not None:
+            cmd_base.extend(["--precision", args.precision])
+        if args.num_workers is not None:
+            cmd_base.extend(["--num-workers", str(args.num_workers)])
+        if args.skip_stage1:
+            cmd_base.append("--skip-stage1")
+        if args.ablation is not None:
+            cmd_base.extend(["--ablation", str(args.ablation)])
+        if args.eval_only:
+            cmd_base.append("--eval-only")
+
+        prof = args.profile if args.profile else "kaggle_tpu_v5e"
+        workers = []
+        for f in args.folds:
+            env = os.environ.copy()
+            env["PJRT_DEVICE"] = "TPU"
+            env["TPU_VISIBLE_DEVICES"] = str(f)
+            logger.info(f"Spawning TPU worker for Fold {f} on TPU Core {f} (TPU_VISIBLE_DEVICES={f})...")
+            p = subprocess.Popen(cmd_base + [
+                "--folds", str(f),
+                "--profile", prof,
+                "--device", "xla",
+            ], env=env)
+            workers.append(p)
+
+        for p in workers:
+            p.wait()
+        logger.info("All Multi-TPU training workers finished.")
+
     # Dual-GPU Dispatch
-    if args.dual_gpu and not args.worker_only and torch.cuda.device_count() >= 2:
+    elif args.dual_gpu and not args.worker_only and torch.cuda.device_count() >= 2:
         logger.info("Initializing Asynchronous Dual-GPU Execution (cuda:0 -> Folds [0,1,2] | cuda:1 -> Folds [3,4])...")
         cmd_base = [sys.executable, sys.argv[0], "--worker-only"]
         if args.config_model:
@@ -305,9 +357,17 @@ def main():
     elif not args.eval_only:
         # Sequential Single-Device Execution
         device_str = args.device if args.device != "auto" else (
+            "xla" if "PJRT_DEVICE" in os.environ and os.environ.get("PJRT_DEVICE") == "TPU" or "TPU_NAME" in os.environ else
             "cuda:0" if torch.cuda.is_available() else "mps" if hasattr(torch.backends, "mps") and torch.backends.mps.is_available() else "cpu"
         )
-        device = torch.device(device_str)
+        if "xla" in device_str:
+            try:
+                import torch_xla.core.xla_model as xm
+                device = xm.xla_device()
+            except ImportError:
+                device = torch.device(device_str)
+        else:
+            device = torch.device(device_str)
         batch_size = args.batch_size if args.batch_size is not None else train_cfg.get("batch_size", 64)
         grad_accum = args.grad_accum_steps if args.grad_accum_steps is not None else train_cfg.get("grad_accum_steps", 1)
         precision = args.precision if args.precision is not None else train_cfg.get("precision", "fp32")
@@ -333,9 +393,18 @@ def main():
 
     # Synthesize 5-Fold Results & Soft Ensemble
     logger.info("=== Synthesizing 5-Fold Cross-Validation & Ensemble Results ===")
-    eval_device = torch.device(
+    eval_device_str = (
+        "xla" if "PJRT_DEVICE" in os.environ and os.environ.get("PJRT_DEVICE") == "TPU" or "TPU_NAME" in os.environ else
         "cuda:0" if torch.cuda.is_available() else "mps" if hasattr(torch.backends, "mps") and torch.backends.mps.is_available() else "cpu"
     )
+    if "xla" in eval_device_str:
+        try:
+            import torch_xla.core.xla_model as xm
+            eval_device = xm.xla_device()
+        except ImportError:
+            eval_device = torch.device(eval_device_str)
+    else:
+        eval_device = torch.device(eval_device_str)
 
     # Load test dataloader
     _, _, test_loader, item_bank = get_xes3g5m_dataloaders(

@@ -61,3 +61,12 @@ profiles:
     num_workers: 2
     pin_memory: true
 
+  kaggle_tpu_v5e:
+    device: "xla"
+    precision: "amp_bf16"
+    batch_size: 64
+    grad_accum_steps: 2
+    test_batch_size: 128
+    num_workers: 4
+    pin_memory: false
+

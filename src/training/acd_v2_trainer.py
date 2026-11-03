@@ -97,14 +97,27 @@ class ACDMMKTv2Trainer:
             logger: Optional logger instance.
         """
         if device is None:
-            if torch.cuda.is_available():
+            if "PJRT_DEVICE" in os.environ and os.environ.get("PJRT_DEVICE") == "TPU" or "TPU_NAME" in os.environ:
+                try:
+                    import torch_xla.core.xla_model as xm
+                    self.device = xm.xla_device()
+                except ImportError:
+                    self.device = torch.device("xla")
+            elif torch.cuda.is_available():
                 self.device = torch.device("cuda:0")
             elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
                 self.device = torch.device("mps")
             else:
                 self.device = torch.device("cpu")
         elif isinstance(device, str):
-            self.device = torch.device(device)
+            if "xla" in device:
+                try:
+                    import torch_xla.core.xla_model as xm
+                    self.device = xm.xla_device()
+                except ImportError:
+                    self.device = torch.device(device)
+            else:
+                self.device = torch.device(device)
         else:
             self.device = device
 
@@ -148,6 +161,7 @@ class ACDMMKTv2Trainer:
 
         # Initialize AMP scaler if CUDA and amp_fp16 requested
         self.scaler = None
+        self.is_xla = (self.device.type == "xla")
         if "cuda" in str(self.device) and "fp16" in self.precision:
             self.scaler = torch.cuda.amp.GradScaler()
 
@@ -247,12 +261,19 @@ class ACDMMKTv2Trainer:
 
                 loss.backward()
                 clip_grad_norm_(stage1_params, self.max_grad_norm)
-                optimizer.step()
+                if self.is_xla:
+                    import torch_xla.core.xla_model as xm
+                    xm.optimizer_step(optimizer)
+                else:
+                    optimizer.step()
 
                 epoch_loss += loss.item()
                 num_batches += 1
 
             scheduler.step()
+            if self.is_xla:
+                import torch_xla.core.xla_model as xm
+                xm.mark_step()
             avg_loss = epoch_loss / max(1, num_batches)
             current_lr = scheduler.get_last_lr()[0]
             self.logger.info(
@@ -273,6 +294,9 @@ class ACDMMKTv2Trainer:
         """
         self.model.train()
         self.model.clear_item_cache()
+        if self.is_xla:
+            import torch_xla.core.xla_model as xm
+            xm.mark_step()
 
         total_loss_accum = 0.0
         total_bce_accum = 0.0
@@ -303,6 +327,18 @@ class ACDMMKTv2Trainer:
                     )
                     loss = loss / self.grad_accum_steps
                 self.scaler.scale(loss).backward()
+            elif self.is_xla and ("bf16" in self.precision or "fp16" in self.precision):
+                with torch.autocast(device_type="xla", dtype=torch.bfloat16):
+                    outputs = self.model(batch, use_cache=False)
+                    loss, metrics = self.loss_fn(
+                        model_outputs=outputs,
+                        targets=targets,
+                        loss_mask=loss_mask,
+                        n_q_all=self.n_q,
+                        d_q_all=self.d_q,
+                    )
+                    loss = loss / self.grad_accum_steps
+                loss.backward()
             else:
                 outputs = self.model(batch, use_cache=False)
                 loss, metrics = self.loss_fn(
@@ -328,7 +364,11 @@ class ACDMMKTv2Trainer:
                     self.scaler.update()
                 else:
                     clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
-                    optimizer.step()
+                    if self.is_xla:
+                        import torch_xla.core.xla_model as xm
+                        xm.optimizer_step(optimizer)
+                    else:
+                        optimizer.step()
                 optimizer.zero_grad()
 
             if self.device.type == "mps" and (step + 1) % 25 == 0:
@@ -378,6 +418,9 @@ class ACDMMKTv2Trainer:
                 all_targets.extend(valid_targets)
 
         self.model.clear_item_cache()
+        if self.is_xla:
+            import torch_xla.core.xla_model as xm
+            xm.mark_step()
 
         metrics = calculate_metrics(all_preds, all_targets)
         return metrics

@@ -60,9 +60,22 @@ def main():
 
     # 1. Device Selection
     if args.device == "auto":
-        device = torch.device(
-            "cuda" if torch.cuda.is_available() else "mps" if hasattr(torch.backends, "mps") and torch.backends.mps.is_available() else "cpu"
-        )
+        if "PJRT_DEVICE" in os.environ and os.environ.get("PJRT_DEVICE") == "TPU" or "TPU_NAME" in os.environ:
+            try:
+                import torch_xla.core.xla_model as xm
+                device = xm.xla_device()
+            except ImportError:
+                device = torch.device("xla")
+        else:
+            device = torch.device(
+                "cuda" if torch.cuda.is_available() else "mps" if hasattr(torch.backends, "mps") and torch.backends.mps.is_available() else "cpu"
+            )
+    elif "xla" in args.device:
+        try:
+            import torch_xla.core.xla_model as xm
+            device = xm.xla_device()
+        except ImportError:
+            device = torch.device(args.device)
     else:
         device = torch.device(args.device)
     logger.info(f"Compute Device: {device}")

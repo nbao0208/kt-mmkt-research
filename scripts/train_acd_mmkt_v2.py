@@ -48,8 +48,8 @@ def parse_args():
     parser.add_argument("--batch-size", type=int, default=None, help="Mini-batch size")
     parser.add_argument("--lr", type=float, default=None, help="Learning rate")
     parser.add_argument("--seed", type=int, default=None, help="Random seed for reproducibility")
-    parser.add_argument("--device", type=str, default=None, help="Compute device ('cuda', 'cuda:0', 'mps', 'cpu')")
-    parser.add_argument("--profile", type=str, choices=["m1_pro", "dual_gpu_5060ti", "dual_gpu_3060", "kaggle_t4"], default=None, help="Hardware execution profile")
+    parser.add_argument("--device", type=str, default=None, help="Compute device ('cuda', 'cuda:0', 'xla', 'mps', 'cpu')")
+    parser.add_argument("--profile", type=str, choices=["m1_pro", "dual_gpu_5060ti", "dual_gpu_3060", "kaggle_t4", "kaggle_tpu_v5e"], default=None, help="Hardware execution profile")
     parser.add_argument("--precision", type=str, choices=["fp32", "amp_fp16", "amp_bf16"], default=None, help="Computation precision")
     parser.add_argument("--grad-accum-steps", type=int, default=None, help="Gradient accumulation steps")
     parser.add_argument("--num-workers", type=int, default=None, help="Number of DataLoader workers")
@@ -112,8 +112,19 @@ def main():
     elif "device" in train_cfg and train_cfg["device"] != "auto":
         device_str = train_cfg["device"]
     else:
-        device_str = "cuda:0" if torch.cuda.is_available() else "mps" if hasattr(torch.backends, "mps") and torch.backends.mps.is_available() else "cpu"
-    device = torch.device(device_str)
+        device_str = (
+            "xla" if "PJRT_DEVICE" in os.environ and os.environ.get("PJRT_DEVICE") == "TPU" or "TPU_NAME" in os.environ else
+            "cuda:0" if torch.cuda.is_available() else "mps" if hasattr(torch.backends, "mps") and torch.backends.mps.is_available() else "cpu"
+        )
+
+    if "xla" in device_str:
+        try:
+            import torch_xla.core.xla_model as xm
+            device = xm.xla_device()
+        except ImportError:
+            device = torch.device(device_str)
+    else:
+        device = torch.device(device_str)
 
     set_seed(seed)
     logger.info(f"Environment: Device={device} | Precision={precision} | Seed={seed} | Fold={val_fold}")
