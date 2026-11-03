@@ -1,0 +1,8 @@
+# Model Architecture Hyperparameters for DKVMN Baseline (from pyKT)
+model_name: "dkvmn"
+num_c: 865
+dim_s: 128
+size_m: 50
+dropout: 0.20
+emb_type: "qid"
+

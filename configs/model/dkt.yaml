@@ -1,0 +1,7 @@
+# Model Architecture Hyperparameters for DKT Baseline (from pyKT)
+model_name: "dkt"
+num_c: 865
+emb_size: 128
+dropout: 0.20
+emb_type: "qid"
+

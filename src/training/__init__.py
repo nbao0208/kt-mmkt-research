@@ -19,6 +19,7 @@ from src.training.trainer import MGMMKTTrainer
 from src.training.mg_v2_trainer import MGMMKTv2Trainer
 from src.training.acd_trainer import ACDMMKTTrainer
 from src.training.acd_v2_trainer import ACDMMKTv2Trainer
+from src.training.pykt_trainer import PyKTTrainer
 
 __all__ = [
     "MaskedBCELoss",
@@ -36,4 +37,5 @@ __all__ = [
     "MGMMKTv2Trainer",
     "ACDMMKTTrainer",
     "ACDMMKTv2Trainer",
+    "PyKTTrainer",
 ]

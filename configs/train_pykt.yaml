@@ -1,0 +1,14 @@
+# Training & Optimization Configuration for pyKT Baselines (DKT, DKVMN, SAKT)
+batch_size: 256
+test_batch_size: 512
+num_workers: 0
+num_epochs: 50
+lr: 1e-3
+weight_decay: 0.0
+patience: 10
+seed: 42
+device: "auto"
+save_dir: "outputs/checkpoints"
+log_dir: "outputs/logs"
+report_dir: "outputs/reports"
+

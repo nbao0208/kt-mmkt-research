@@ -1,8 +1,9 @@
-# Model Architecture Hyperparameters for ID-Only SAKT Baseline
+# Model Architecture Hyperparameters for SAKT Baseline (from pyKT)
 model_name: "sakt"
-num_questions: 7652
-num_kcs: 1175
-d_model: 128
-num_heads: 4
-max_seq_len: 200
+num_c: 865
+seq_len: 200
+emb_size: 128
+num_attn_heads: 4
 dropout: 0.20
+num_en: 2
+emb_type: "qid"
