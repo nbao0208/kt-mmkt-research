@@ -64,7 +64,7 @@ def parse_args():
     parser.add_argument("--output-report-dir", type=str, default="outputs/reports", help="Directory for summary reports")
     parser.add_argument("--eval-only", action="store_true", help="Only evaluate existing fold checkpoints without retraining")
     parser.add_argument("--skip-stage1", action="store_true", help="Skip Stage 1 pre-training")
-    parser.add_argument("--profile", type=str, choices=["m1_pro", "dual_gpu_5060ti", "dual_gpu_3060", "kaggle_t4", "kaggle_tpu_v5e"], default=None, help="Hardware profile")
+    parser.add_argument("--profile", type=str, choices=["m1_pro", "dual_gpu_5060ti", "dual_gpu_3060", "kaggle_t4", "kaggle_tpu_v5e", "colab_t4", "colab_l4", "colab_a100", "colab_tpu_v5e", "colab_tpu_v6e"], default=None, help="Hardware profile")
     parser.add_argument("--num-workers", type=int, default=None, help="Number of DataLoader workers")
     parser.add_argument("--grad-accum-steps", type=int, default=None, help="Gradient accumulation steps")
     parser.add_argument("--precision", type=str, choices=["fp32", "amp_fp16", "amp_bf16"], default=None, help="Compute precision")

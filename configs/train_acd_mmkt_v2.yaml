@@ -70,3 +70,48 @@ profiles:
     num_workers: 4
     pin_memory: false
 
+  colab_t4:
+    device: "cuda:0"
+    precision: "amp_fp16"
+    batch_size: 32
+    grad_accum_steps: 4
+    test_batch_size: 64
+    num_workers: 2
+    pin_memory: true
+
+  colab_l4:
+    device: "cuda:0"
+    precision: "amp_bf16"
+    batch_size: 64
+    grad_accum_steps: 2
+    test_batch_size: 128
+    num_workers: 4
+    pin_memory: true
+
+  colab_a100:
+    device: "cuda:0"
+    precision: "amp_bf16"
+    batch_size: 128
+    grad_accum_steps: 1
+    test_batch_size: 256
+    num_workers: 4
+    pin_memory: true
+
+  colab_tpu_v5e:
+    device: "xla"
+    precision: "amp_bf16"
+    batch_size: 64
+    grad_accum_steps: 2
+    test_batch_size: 128
+    num_workers: 4
+    pin_memory: false
+
+  colab_tpu_v6e:
+    device: "xla"
+    precision: "amp_bf16"
+    batch_size: 128
+    grad_accum_steps: 1
+    test_batch_size: 256
+    num_workers: 4
+    pin_memory: false
+

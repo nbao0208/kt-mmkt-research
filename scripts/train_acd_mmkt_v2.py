@@ -49,7 +49,7 @@ def parse_args():
     parser.add_argument("--lr", type=float, default=None, help="Learning rate")
     parser.add_argument("--seed", type=int, default=None, help="Random seed for reproducibility")
     parser.add_argument("--device", type=str, default=None, help="Compute device ('cuda', 'cuda:0', 'xla', 'mps', 'cpu')")
-    parser.add_argument("--profile", type=str, choices=["m1_pro", "dual_gpu_5060ti", "dual_gpu_3060", "kaggle_t4", "kaggle_tpu_v5e"], default=None, help="Hardware execution profile")
+    parser.add_argument("--profile", type=str, choices=["m1_pro", "dual_gpu_5060ti", "dual_gpu_3060", "kaggle_t4", "kaggle_tpu_v5e", "colab_t4", "colab_l4", "colab_a100", "colab_tpu_v5e", "colab_tpu_v6e"], default=None, help="Hardware execution profile")
     parser.add_argument("--precision", type=str, choices=["fp32", "amp_fp16", "amp_bf16"], default=None, help="Computation precision")
     parser.add_argument("--grad-accum-steps", type=int, default=None, help="Gradient accumulation steps")
     parser.add_argument("--num-workers", type=int, default=None, help="Number of DataLoader workers")
