@@ -70,6 +70,8 @@ def main():
             device = torch.device(
                 "cuda" if torch.cuda.is_available() else "mps" if hasattr(torch.backends, "mps") and torch.backends.mps.is_available() else "cpu"
             )
+    elif "tpu" in args.device:
+        device = torch.device("tpu")
     elif "xla" in args.device:
         try:
             import torch_xla.core.xla_model as xm

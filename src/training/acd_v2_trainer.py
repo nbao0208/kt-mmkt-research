@@ -97,12 +97,17 @@ class ACDMMKTv2Trainer:
             logger: Optional logger instance.
         """
         if device is None:
-            if "PJRT_DEVICE" in os.environ and os.environ.get("PJRT_DEVICE") == "TPU" or "TPU_NAME" in os.environ:
+            if hasattr(torch, "tpu") and hasattr(torch.tpu, "is_available") and torch.tpu.is_available():
+                self.device = torch.device("tpu")
+            elif "PJRT_DEVICE" in os.environ and os.environ.get("PJRT_DEVICE") == "TPU" or "TPU_NAME" in os.environ:
                 try:
                     import torch_xla.core.xla_model as xm
                     self.device = xm.xla_device()
-                except ImportError:
-                    self.device = torch.device("xla")
+                except Exception:
+                    try:
+                        self.device = torch.device("tpu")
+                    except Exception:
+                        self.device = torch.device("xla")
             elif torch.cuda.is_available():
                 self.device = torch.device("cuda:0")
             elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
@@ -110,11 +115,13 @@ class ACDMMKTv2Trainer:
             else:
                 self.device = torch.device("cpu")
         elif isinstance(device, str):
-            if "xla" in device:
+            if "tpu" in device.lower():
+                self.device = torch.device("tpu")
+            elif "xla" in device.lower():
                 try:
                     import torch_xla.core.xla_model as xm
                     self.device = xm.xla_device()
-                except ImportError:
+                except Exception:
                     self.device = torch.device(device)
             else:
                 self.device = torch.device(device)
@@ -161,7 +168,9 @@ class ACDMMKTv2Trainer:
 
         # Initialize AMP scaler if CUDA and amp_fp16 requested
         self.scaler = None
+        self.is_tpu_native = (self.device.type == "tpu")
         self.is_xla = (self.device.type == "xla")
+        self.is_tpu = self.is_tpu_native or self.is_xla
         if "cuda" in str(self.device) and "fp16" in self.precision:
             self.scaler = torch.cuda.amp.GradScaler()
 
@@ -327,6 +336,18 @@ class ACDMMKTv2Trainer:
                     )
                     loss = loss / self.grad_accum_steps
                 self.scaler.scale(loss).backward()
+            elif self.is_tpu_native and ("bf16" in self.precision or "fp16" in self.precision):
+                with torch.autocast(device_type="tpu", dtype=torch.bfloat16):
+                    outputs = self.model(batch, use_cache=False)
+                    loss, metrics = self.loss_fn(
+                        model_outputs=outputs,
+                        targets=targets,
+                        loss_mask=loss_mask,
+                        n_q_all=self.n_q,
+                        d_q_all=self.d_q,
+                    )
+                    loss = loss / self.grad_accum_steps
+                loss.backward()
             elif self.is_xla and ("bf16" in self.precision or "fp16" in self.precision):
                 with torch.autocast(device_type="xla", dtype=torch.bfloat16):
                     outputs = self.model(batch, use_cache=False)

@@ -356,11 +356,21 @@ def main():
 
     elif not args.eval_only:
         # Sequential Single-Device Execution
+        is_torch_tpu = False
+        try:
+            _ = torch.zeros(1, device="tpu")
+            is_torch_tpu = True
+        except Exception:
+            pass
+
         device_str = args.device if args.device != "auto" else (
+            "tpu" if is_torch_tpu else
             "xla" if "PJRT_DEVICE" in os.environ and os.environ.get("PJRT_DEVICE") == "TPU" or "TPU_NAME" in os.environ else
             "cuda:0" if torch.cuda.is_available() else "mps" if hasattr(torch.backends, "mps") and torch.backends.mps.is_available() else "cpu"
         )
-        if "xla" in device_str:
+        if "tpu" in device_str:
+            device = torch.device("tpu")
+        elif "xla" in device_str:
             try:
                 import torch_xla.core.xla_model as xm
                 device = xm.xla_device()
@@ -394,10 +404,15 @@ def main():
     # Synthesize 5-Fold Results & Soft Ensemble
     logger.info("=== Synthesizing 5-Fold Cross-Validation & Ensemble Results ===")
     eval_device_str = (
-        "xla" if "PJRT_DEVICE" in os.environ and os.environ.get("PJRT_DEVICE") == "TPU" or "TPU_NAME" in os.environ else
-        "cuda:0" if torch.cuda.is_available() else "mps" if hasattr(torch.backends, "mps") and torch.backends.mps.is_available() else "cpu"
+        args.device if args.device != "auto" else (
+            "tpu" if is_torch_tpu else
+            "xla" if "PJRT_DEVICE" in os.environ and os.environ.get("PJRT_DEVICE") == "TPU" or "TPU_NAME" in os.environ else
+            "cuda:0" if torch.cuda.is_available() else "mps" if hasattr(torch.backends, "mps") and torch.backends.mps.is_available() else "cpu"
+        )
     )
-    if "xla" in eval_device_str:
+    if "tpu" in eval_device_str:
+        eval_device = torch.device("tpu")
+    elif "xla" in eval_device_str:
         try:
             import torch_xla.core.xla_model as xm
             eval_device = xm.xla_device()

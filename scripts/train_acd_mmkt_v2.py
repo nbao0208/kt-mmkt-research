@@ -107,22 +107,35 @@ def main():
     data_dir = dataset_cfg.get("data_dir", "data/processed/XES3G5M")
 
     # Device selection
-    if args.device:
+    is_torch_tpu = False
+    try:
+        _ = torch.zeros(1, device="tpu")
+        is_torch_tpu = True
+    except Exception:
+        pass
+
+    if args.device and args.device != "auto":
         device_str = args.device
     elif "device" in train_cfg and train_cfg["device"] != "auto":
         device_str = train_cfg["device"]
     else:
         device_str = (
+            "tpu" if is_torch_tpu else
             "xla" if "PJRT_DEVICE" in os.environ and os.environ.get("PJRT_DEVICE") == "TPU" or "TPU_NAME" in os.environ else
             "cuda:0" if torch.cuda.is_available() else "mps" if hasattr(torch.backends, "mps") and torch.backends.mps.is_available() else "cpu"
         )
 
-    if "xla" in device_str:
+    if "tpu" in device_str:
+        device = torch.device("tpu")
+    elif "xla" in device_str:
         try:
             import torch_xla.core.xla_model as xm
             device = xm.xla_device()
         except ImportError:
-            device = torch.device(device_str)
+            try:
+                device = torch.device("tpu")
+            except Exception:
+                device = torch.device(device_str)
     else:
         device = torch.device(device_str)
 

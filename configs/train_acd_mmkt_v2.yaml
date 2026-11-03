@@ -98,7 +98,7 @@ profiles:
     pin_memory: true
 
   colab_tpu_v5e:
-    device: "xla"
+    device: "auto"
     precision: "amp_bf16"
     batch_size: 64
     grad_accum_steps: 2
@@ -107,7 +107,7 @@ profiles:
     pin_memory: false
 
   colab_tpu_v6e:
-    device: "xla"
+    device: "auto"
     precision: "amp_bf16"
     batch_size: 128
     grad_accum_steps: 1
