@@ -120,6 +120,41 @@ def test_test_question_grouping_count():
     assert total_eval == 1099197, f"Expected exactly 1,099,197 evaluated questions, got {total_eval}"
 
 
+def test_pykt_5fold_raw_student_isolation():
+    """
+    Verify strict 5-Fold student partition isolation directly on raw XES3G5M CSV files:
+    - 0% student overlap between any pair of cross-validation folds.
+    - 0% student overlap between any fold and the independent test set.
+    """
+    import pandas as pd
+
+    train_csv = "data/raw/XES3G5M/kc_level/train_valid_sequences.csv"
+    test_csv = "data/raw/XES3G5M/kc_level/test.csv"
+    assert os.path.exists(train_csv), f"Missing raw file: {train_csv}"
+    assert os.path.exists(test_csv), f"Missing raw file: {test_csv}"
+
+    df_train = pd.read_csv(train_csv)
+    df_test = pd.read_csv(test_csv)
+
+    fold_uids = [set(df_train[df_train["fold"] == f]["uid"].unique()) for f in range(5)]
+    test_uids = set(df_test["uid"].unique())
+
+    assert len(test_uids) == 3613, f"Expected 3,613 test students, got {len(test_uids)}"
+    total_train_students = sum(len(u) for u in fold_uids)
+    assert total_train_students == 14453, f"Expected 14,453 train students, got {total_train_students}"
+
+    # Pairwise disjointness between folds
+    for i in range(5):
+        for j in range(i + 1, 5):
+            overlap = fold_uids[i].intersection(fold_uids[j])
+            assert len(overlap) == 0, f"Student leakage between Fold {i} and Fold {j}: {len(overlap)} shared students!"
+
+    # Disjointness with test set
+    for f in range(5):
+        overlap = fold_uids[f].intersection(test_uids)
+        assert len(overlap) == 0, f"Student leakage between Fold {f} and Test set: {len(overlap)} shared students!"
+
+
 def test_paired_statistical_testing():
     """
     Verify paired t-test and Wilcoxon test output structure.
