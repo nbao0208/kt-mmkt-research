@@ -692,3 +692,98 @@ class ACDMMKTv2Loss(nn.Module):
         }
         return total_loss, metrics
 
+
+class ACDMMKTv3Loss(nn.Module):
+    """
+    Multi-Task Loss Objective for ACD-MMKTv3.
+    Combines:
+    1. Primary pyKT sequential prediction BCE loss (L_BCE) on active interactions (loss_mask).
+    2. Bayesian sample-size weighted difficulty calibration loss (L_D^weighted) on unique active questions (using clean modalities).
+    3. Sparsity shrinkage penalty lambda_sparse * ((Delta_mu_stem)^2 + (Delta_mu_sol)^2) on unique active questions.
+    L_ACD = L_BCE + beta_D * L_D^weighted + lambda_sparse * L_sparse.
+    """
+
+    def __init__(
+        self,
+        beta_d: float = 0.20,
+        lambda_sparse: float = 0.01,
+        kappa: float = 10.0,
+    ):
+        """
+        Initialize ACDMMKTv3Loss.
+
+        Args:
+            beta_d: Weight for difficulty calibration loss (default: 0.20).
+            lambda_sparse: Sparsity shrinkage penalty coefficient (default: 0.01).
+            kappa: Bayesian sample size smoothing constant (default: 10.0).
+        """
+        super().__init__()
+        self.beta_d = beta_d
+        self.lambda_sparse = lambda_sparse
+        self.bce_loss_fn = MaskedBCELoss()
+        self.diff_loss_fn = BayesianWeightedDifficultyLoss(kappa=kappa)
+
+    def forward(
+        self,
+        model_outputs: Dict[str, torch.Tensor],
+        targets: torch.Tensor,
+        loss_mask: torch.Tensor,
+        n_q_all: torch.Tensor,
+        d_q_all: torch.Tensor,
+        unanchored_concept: bool = False,
+    ) -> Tuple[torch.Tensor, Dict[str, float]]:
+        """
+        Compute total ACD-MMKTv3 loss and metrics.
+
+        Args:
+            model_outputs: Output dictionary from ACDMMKTv3.forward().
+            targets: Ground-truth student correctness labels [B, L].
+            loss_mask: Valid interaction mask excluding t = 0 [B, L].
+            n_q_all: Fold sample sizes array [7652].
+            d_q_all: Fold empirical CTT error rates [7652].
+            unanchored_concept: If True (Ablation 4), disables sparsity regularization.
+
+        Returns:
+            Tuple of (total_loss, metrics_dict).
+        """
+        logits = model_outputs["logits"]
+
+        # 1. Primary Knowledge Tracing BCE loss
+        l_bce = self.bce_loss_fn(logits, targets, loss_mask)
+
+        # 2. Extract unique active questions and clean item properties
+        clean_props = model_outputs.get("clean_item_props")
+        unique_q = model_outputs.get("unique_q")
+
+        if clean_props is not None and unique_q is not None and len(unique_q) > 0:
+            clean_tilde_mu = clean_props["tilde_mu"]
+            clean_delta_stem = clean_props["delta_mu_stem"]
+            clean_delta_sol = clean_props["delta_mu_sol"]
+
+            target_n = n_q_all[unique_q].to(logits.device)
+            target_d = d_q_all[unique_q].to(logits.device)
+
+            if self.beta_d > 0.0:
+                l_diff = self.diff_loss_fn(clean_tilde_mu, target_d, target_n)
+            else:
+                l_diff = torch.tensor(0.0, device=logits.device)
+
+            if self.lambda_sparse > 0.0 and not unanchored_concept:
+                l_sparse = (clean_delta_stem.pow(2) + clean_delta_sol.pow(2)).mean()
+            else:
+                l_sparse = torch.tensor(0.0, device=logits.device)
+        else:
+            l_diff = torch.tensor(0.0, device=logits.device)
+            l_sparse = torch.tensor(0.0, device=logits.device)
+
+        total_loss = l_bce + self.beta_d * l_diff + self.lambda_sparse * l_sparse
+
+        metrics = {
+            "loss_total": total_loss.item(),
+            "loss_bce": l_bce.item(),
+            "loss_diff": l_diff.item(),
+            "loss_sparse": l_sparse.item(),
+        }
+        return total_loss, metrics
+
+

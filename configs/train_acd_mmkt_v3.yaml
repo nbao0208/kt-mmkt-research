@@ -1,0 +1,108 @@
+# Training & Optimization Configuration for ACD-MMKTv3 (End-to-End pyKT Compliant)
+val_fold: 0
+seed: 42
+data_dir: "data/processed/XES3G5M"
+save_dir: null
+log_dir: "outputs/logs"
+
+# End-to-End Sequential KT Optimization
+num_epochs: 50
+lr: 0.001
+weight_decay: 0.0001
+max_grad_norm: 1.0
+patience: 10
+warmup_epochs: 2
+eta_min: 0.00001
+p_drop: 0.15
+test_stride: 100
+
+# Loss hyper-parameters
+beta_d: 0.20
+lambda_sparse: 0.01
+kappa: 10.0
+
+# Hardware execution profiles
+profiles:
+  m1_pro:
+    device: "mps"
+    precision: "fp32"
+    batch_size: 32
+    grad_accum_steps: 2
+    test_batch_size: 64
+    num_workers: 0
+    pin_memory: false
+
+  dual_gpu_5060ti:
+    device: "cuda:0"
+    precision: "amp_fp16"
+    batch_size: 128
+    grad_accum_steps: 1
+    test_batch_size: 256
+    num_workers: 4
+    pin_memory: true
+    assigned_folds: [0, 1, 2]
+
+  dual_gpu_3060:
+    device: "cuda:1"
+    precision: "amp_fp16"
+    batch_size: 64
+    grad_accum_steps: 2
+    test_batch_size: 128
+    num_workers: 4
+    pin_memory: true
+    assigned_folds: [3, 4]
+
+  kaggle_t4:
+    device: "cuda:0"
+    precision: "amp_fp16"
+    batch_size: 32
+    grad_accum_steps: 4
+    test_batch_size: 64
+    num_workers: 2
+    pin_memory: true
+
+  kaggle_tpu_v5e:
+    device: "xla"
+    precision: "amp_bf16"
+    batch_size: 64
+    grad_accum_steps: 2
+    test_batch_size: 128
+    num_workers: 4
+    pin_memory: false
+
+  colab_t4:
+    device: "cuda:0"
+    precision: "amp_fp16"
+    batch_size: 32
+    grad_accum_steps: 4
+    test_batch_size: 64
+    num_workers: 2
+    pin_memory: true
+
+  colab_l4:
+    device: "cuda:0"
+    precision: "amp_bf16"
+    batch_size: 64
+    grad_accum_steps: 2
+    test_batch_size: 128
+    num_workers: 4
+    pin_memory: true
+
+  colab_a100:
+    device: "cuda:0"
+    precision: "amp_bf16"
+    batch_size: 128
+    grad_accum_steps: 1
+    test_batch_size: 256
+    num_workers: 4
+    pin_memory: true
+
+  colab_tpu_v5e:
+    device: "xla"
+    precision: "amp_bf16"
+    batch_size: 64
+    grad_accum_steps: 2
+    test_batch_size: 128
+    num_workers: 4
+    pin_memory: false
+

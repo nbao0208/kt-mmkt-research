@@ -41,6 +41,18 @@ from src.models.modules.asymmetric_monotonic_retriever import (
 from src.models.modules.monotonic_2pl_irt import (
     Monotonic2PLIRT,
 )
+from src.models.modules.text_guided_cross_aligner import (
+    TextGuidedCrossAligner,
+)
+from src.models.modules.identifiable_rasch_hypergraph import (
+    IdentifiableRaschHypergraph,
+)
+from src.models.modules.atomic_monotonic_retriever import (
+    AtomicMonotonicRetriever,
+)
+from src.models.modules.identifiable_2pl_irt import (
+    Identifiable2PLIRT,
+)
 
 __all__ = [
     "ModalityImputationLayer",
@@ -64,4 +76,8 @@ __all__ = [
     "AdditiveRaschHypergraph",
     "AsymmetricMonotonicRetriever",
     "Monotonic2PLIRT",
+    "TextGuidedCrossAligner",
+    "IdentifiableRaschHypergraph",
+    "AtomicMonotonicRetriever",
+    "Identifiable2PLIRT",
 ]

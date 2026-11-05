@@ -1,0 +1,27 @@
+# Model Architecture Hyperparameters for ACD-MMKTv3
+# Asymmetric Causal-Disentangled Multimodal Knowledge Tracing v3
+model_name: "acd_mmkt_v3"
+num_questions: 7652
+num_kcs: 1175
+d_raw_txt: 768
+d_raw_img: 768
+d_model: 128
+num_heads: 4
+max_seq_len: 200
+dropout: 0.15
+hgnn_layers: 2
+gamma_vis: 1.5
+delta_a: 0.1
+kappa_smoothing: 10.0
+beta_difficulty: 0.20
+lambda_sparse: 0.01
+p_visual_drop: 0.15
+
+# Modality & Ablation Flags (all defaults for full ACD-MMKTv3)
+post_diag_mode: "none"             # "none" for standard unpolluted benchmark, "behavioral" enables causal post-diagnostic vector
+use_solution: true               # Ablation 2: false disables solution algorithmic stream (Delta_mu_sol=0, no v_sol in d^q or a_q)
+use_visual: true                 # Ablation 3: false disables text-guided visual stream (lambda_q=0, Delta_mu_vis=0)
+unanchored_concept: false        # Ablation 4: true disables fixed logit(mu_prior) anchor (uses free projection from c_C) and sets lambda_sparse=0
+polluted_experience_attn: false  # Ablation 5: true passes y_tau through causal self-attention (pollutes atomic history)
+use_deep_irt: true               # Ablation 6: false replaces monotonic 2PL-IRT with black-box MLP [h_t || x_tilde_t]
+

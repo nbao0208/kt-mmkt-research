@@ -81,7 +81,7 @@ def load_static_item_bank_optimized(
     full_path = os.path.join(processed_dir, "static_item_bank.pt")
     mg_path = os.path.join(processed_dir, "mg_static_item_bank.pt")
 
-    if model_type.lower() in ("acd_mmkt", "acd_mmkt_v2"):
+    if model_type.lower() in ("acd_mmkt", "acd_mmkt_v2", "acd_mmkt_v3"):
         if os.path.exists(full_path):
             try:
                 # Use mmap=True to avoid loading 4.5 GB into physical CPU RAM
@@ -90,13 +90,26 @@ def load_static_item_bank_optimized(
                 bank = torch.load(full_path, map_location="cpu")
 
             # Load auxiliary metadata if available in processed_dir
-            aux_path = os.path.join(processed_dir, "acd_v2_aux_metadata.pt")
-            if os.path.exists(aux_path):
-                aux_data = torch.load(aux_path, map_location="cpu")
-                if isinstance(bank, dict):
-                    bank["N_q_folds"] = aux_data.get("N_q_folds")
-                    bank["D_q_folds"] = aux_data.get("D_q_folds")
-                    bank["omega_q_folds"] = aux_data.get("omega_q_folds")
+            if model_type.lower() == "acd_mmkt_v3":
+                aux_path = os.path.join(processed_dir, "acd_v3_aux_metadata.pt")
+                if os.path.exists(aux_path):
+                    aux_data = torch.load(aux_path, map_location="cpu")
+                    if isinstance(bank, dict):
+                        bank["M_patch_q"] = aux_data.get("M_patch_q")
+                        bank["patch_valid_mask"] = aux_data.get("patch_valid_mask")
+                        bank["N_q_folds"] = aux_data.get("N_q_folds")
+                        bank["D_q_folds"] = aux_data.get("D_q_folds")
+                        bank["omega_q_folds"] = aux_data.get("omega_q_folds")
+                        bank["mu_prior_folds"] = aux_data.get("mu_prior_folds")
+                        bank["mu_concept_folds"] = aux_data.get("mu_concept_folds")
+            else:
+                aux_path = os.path.join(processed_dir, "acd_v2_aux_metadata.pt")
+                if os.path.exists(aux_path):
+                    aux_data = torch.load(aux_path, map_location="cpu")
+                    if isinstance(bank, dict):
+                        bank["N_q_folds"] = aux_data.get("N_q_folds")
+                        bank["D_q_folds"] = aux_data.get("D_q_folds")
+                        bank["omega_q_folds"] = aux_data.get("omega_q_folds")
             return bank
         raise FileNotFoundError(f"Full static item bank not found at {full_path} for {model_type}")
 
@@ -147,7 +160,7 @@ class XES3G5MDataset(Dataset):
         # Load Static Item Bank metadata (avoiding retaining 4.3 GB acd_E_* token/patch tensors in dataset memory)
         if isinstance(static_item_bank, str):
             if os.path.isdir(static_item_bank):
-                bank_dict = load_static_item_bank_optimized(static_item_bank)
+                bank_dict = load_static_item_bank_optimized(static_item_bank, model_type=self.model_type)
             else:
                 bank_dict = torch.load(static_item_bank, map_location="cpu")
         else:
@@ -180,36 +193,77 @@ class XES3G5MDataset(Dataset):
             self.ctt_difficulty = torch.zeros(7652, dtype=torch.float32)
             self.ctt_valid_mask = torch.zeros(7652, dtype=torch.bool)
 
-        # Auxiliary metadata for ACD-MMKTv2 (N_q, D_q, omega_q)
+        # Auxiliary metadata for ACD-MMKTv2 / ACD-MMKTv3
         aux_loaded = False
+        self.mu_concept = torch.zeros(7652, dtype=torch.float32)
+        self.mu_prior = torch.zeros(7652, dtype=torch.float32)
+        self.M_patch_q = torch.zeros((7652, 49), dtype=torch.float32)
+        self.patch_valid_mask = torch.ones((7652, 49), dtype=torch.bool)
+
         if "N_q_folds" in bank_dict and bank_dict["N_q_folds"] is not None:
             self.N_q = bank_dict["N_q_folds"][self.fold]
             self.D_q = bank_dict["D_q_folds"][self.fold]
             self.omega_q = bank_dict["omega_q_folds"][self.fold]
+            if "mu_concept_folds" in bank_dict and bank_dict["mu_concept_folds"] is not None:
+                self.mu_concept = bank_dict["mu_concept_folds"][self.fold]
+            if "mu_prior_folds" in bank_dict and bank_dict["mu_prior_folds"] is not None:
+                self.mu_prior = bank_dict["mu_prior_folds"][self.fold]
+            if "M_patch_q" in bank_dict and bank_dict["M_patch_q"] is not None:
+                self.M_patch_q = bank_dict["M_patch_q"]
+            if "patch_valid_mask" in bank_dict and bank_dict["patch_valid_mask"] is not None:
+                self.patch_valid_mask = bank_dict["patch_valid_mask"]
             aux_loaded = True
-        elif data_dir and os.path.exists(os.path.join(data_dir, "acd_v2_aux_metadata.pt")):
-            aux_data = torch.load(os.path.join(data_dir, "acd_v2_aux_metadata.pt"), map_location="cpu")
-            self.N_q = aux_data["N_q_folds"][self.fold]
-            self.D_q = aux_data["D_q_folds"][self.fold]
-            self.omega_q = aux_data["omega_q_folds"][self.fold]
-            aux_loaded = True
-        elif isinstance(static_item_bank, str) and os.path.isdir(static_item_bank):
-            aux_file = os.path.join(static_item_bank, "acd_v2_aux_metadata.pt")
+        elif data_dir:
+            aux_name = "acd_v3_aux_metadata.pt" if self.model_type == "acd_mmkt_v3" else "acd_v2_aux_metadata.pt"
+            aux_file = os.path.join(data_dir, aux_name)
             if os.path.exists(aux_file):
                 aux_data = torch.load(aux_file, map_location="cpu")
                 self.N_q = aux_data["N_q_folds"][self.fold]
                 self.D_q = aux_data["D_q_folds"][self.fold]
                 self.omega_q = aux_data["omega_q_folds"][self.fold]
+                if "mu_concept_folds" in aux_data:
+                    self.mu_concept = aux_data["mu_concept_folds"][self.fold]
+                if "mu_prior_folds" in aux_data:
+                    self.mu_prior = aux_data["mu_prior_folds"][self.fold]
+                if "M_patch_q" in aux_data:
+                    self.M_patch_q = aux_data["M_patch_q"]
+                if "patch_valid_mask" in aux_data:
+                    self.patch_valid_mask = aux_data["patch_valid_mask"]
+                aux_loaded = True
+        elif isinstance(static_item_bank, str) and os.path.isdir(static_item_bank):
+            aux_name = "acd_v3_aux_metadata.pt" if self.model_type == "acd_mmkt_v3" else "acd_v2_aux_metadata.pt"
+            aux_file = os.path.join(static_item_bank, aux_name)
+            if os.path.exists(aux_file):
+                aux_data = torch.load(aux_file, map_location="cpu")
+                self.N_q = aux_data["N_q_folds"][self.fold]
+                self.D_q = aux_data["D_q_folds"][self.fold]
+                self.omega_q = aux_data["omega_q_folds"][self.fold]
+                if "mu_concept_folds" in aux_data:
+                    self.mu_concept = aux_data["mu_concept_folds"][self.fold]
+                if "mu_prior_folds" in aux_data:
+                    self.mu_prior = aux_data["mu_prior_folds"][self.fold]
+                if "M_patch_q" in aux_data:
+                    self.M_patch_q = aux_data["M_patch_q"]
+                if "patch_valid_mask" in aux_data:
+                    self.patch_valid_mask = aux_data["patch_valid_mask"]
                 aux_loaded = True
 
         if not aux_loaded:
             # Fallback path
-            fallback_aux = os.path.join("data", "processed", "XES3G5M", "acd_v2_aux_metadata.pt")
+            fallback_aux = os.path.join("data", "processed", "XES3G5M", "acd_v3_aux_metadata.pt" if self.model_type == "acd_mmkt_v3" else "acd_v2_aux_metadata.pt")
             if os.path.exists(fallback_aux):
                 aux_data = torch.load(fallback_aux, map_location="cpu")
                 self.N_q = aux_data["N_q_folds"][self.fold]
                 self.D_q = aux_data["D_q_folds"][self.fold]
                 self.omega_q = aux_data["omega_q_folds"][self.fold]
+                if "mu_concept_folds" in aux_data:
+                    self.mu_concept = aux_data["mu_concept_folds"][self.fold]
+                if "mu_prior_folds" in aux_data:
+                    self.mu_prior = aux_data["mu_prior_folds"][self.fold]
+                if "M_patch_q" in aux_data:
+                    self.M_patch_q = aux_data["M_patch_q"]
+                if "patch_valid_mask" in aux_data:
+                    self.patch_valid_mask = aux_data["patch_valid_mask"]
             else:
                 self.N_q = torch.zeros(7652, dtype=torch.int64)
                 self.D_q = torch.zeros(7652, dtype=torch.float32)
@@ -226,6 +280,10 @@ class XES3G5MDataset(Dataset):
             "N_q": self.N_q,
             "D_q": self.D_q,
             "omega_q": self.omega_q,
+            "mu_concept": self.mu_concept,
+            "mu_prior": self.mu_prior,
+            "M_patch_q": self.M_patch_q,
+            "patch_valid_mask": self.patch_valid_mask,
         }
 
         # Precompute or assign loss masks and evaluation masks
@@ -289,8 +347,8 @@ class XES3G5MDataset(Dataset):
 
         # Apply Dynamic Modality Dropout during training
         if self.is_train and self.p_drop > 0.0:
-            if self.model_type == "acd_mmkt_v2":
-                # ACD-MMKTv2 Constraint 1: Text is 100% preserved. Only visual channels dropped.
+            if self.model_type in ("acd_mmkt_v2", "acd_mmkt_v3"):
+                # ACD-MMKT Constraint: Text is 100% preserved. Only visual channels dropped.
                 drop_q = (torch.rand(self.max_seq_len) >= self.p_drop).float()
                 drop_s = (torch.rand(self.max_seq_len) >= self.p_drop).float()
                 mod_mask_seq[:, 0] = mod_mask_seq[:, 0] * drop_q  # stem image
@@ -302,6 +360,15 @@ class XES3G5MDataset(Dataset):
                 # If dropped, solution text and solution image are masked out
                 mod_mask_seq[:, 1] = mod_mask_seq[:, 1] * drop_sample.float()
                 mod_mask_seq[:, 2] = mod_mask_seq[:, 2] * drop_sample.float()
+
+        # Normalized temporal dynamics for ACD-MMKTv3
+        kc_first_flag = (delta_t_kc < 0).float()
+        norm_delta_t_kc = torch.where(
+            delta_t_kc >= 0,
+            torch.clamp(delta_t_kc / 16.118, min=0.0, max=1.0),
+            torch.zeros_like(delta_t_kc),
+        )
+        norm_delta_t_lag = torch.clamp(delta_t_lag, min=0.0, max=1.0)
 
         # Build dynamic context vector (21 dimensions: 15 static + 4 dynamic temporal/proficiency + 2 solution presence flags)
         dynamic_ctx_seq = torch.cat(
@@ -329,8 +396,12 @@ class XES3G5MDataset(Dataset):
             "eval_mask": eval_mask,
             "delta_t_lag": delta_t_lag,
             "delta_t_kc": delta_t_kc,
+            "norm_delta_t_lag": norm_delta_t_lag,
+            "norm_delta_t_kc": norm_delta_t_kc,
+            "kc_first_flag": kc_first_flag,
             "batch_flag": batch_flag,
             "running_acc_prev": running_acc,
+            "static_ctx": static_ctx_seq,
             "dynamic_ctx": dynamic_ctx_seq,
             "modality_masks": mod_mask_seq,
             "raw_modality_masks": raw_mod_mask_seq,
@@ -341,6 +412,10 @@ class XES3G5MDataset(Dataset):
             "N_q": self.N_q[q_seq],
             "D_q": self.D_q[q_seq],
             "omega_q": self.omega_q[q_seq],
+            "mu_concept": self.mu_concept[q_seq],
+            "mu_prior": self.mu_prior[q_seq],
+            "M_patch_q": self.M_patch_q[q_seq],
+            "patch_valid_mask": self.patch_valid_mask[q_seq],
         }
 
         return item
