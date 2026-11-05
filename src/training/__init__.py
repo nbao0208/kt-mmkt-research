@@ -21,7 +21,11 @@ from src.training.mg_v2_trainer import MGMMKTv2Trainer
 from src.training.acd_trainer import ACDMMKTTrainer
 from src.training.acd_v2_trainer import ACDMMKTv2Trainer
 from src.training.acd_v3_trainer import ACDMMKTv3Trainer
-from src.training.pykt_trainer import PyKTTrainer
+
+try:
+    from src.training.pykt_trainer import PyKTTrainer
+except ImportError:
+    PyKTTrainer = None
 
 __all__ = [
     "MaskedBCELoss",

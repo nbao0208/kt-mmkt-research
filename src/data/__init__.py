@@ -9,11 +9,17 @@ from src.data.xes3g5m_dataset import (
     build_test_strided_windows,
     create_mg_static_item_bank,
 )
-from src.data.pykt_dataset import (
-    get_pykt_dataloaders,
-    load_test_grouped_data,
-    load_stratification_metadata,
-)
+
+try:
+    from src.data.pykt_dataset import (
+        get_pykt_dataloaders,
+        load_test_grouped_data,
+        load_stratification_metadata,
+    )
+except ImportError:
+    get_pykt_dataloaders = None
+    load_test_grouped_data = None
+    load_stratification_metadata = None
 
 __all__ = [
     "XES3G5MDataset",
