@@ -59,10 +59,11 @@ def parse_args():
     parser.add_argument(
         "--ablation",
         type=int,
-        choices=[1, 2, 3, 4, 5, 6],
+        choices=[0, 1, 2, 3, 4, 5, 6],
         default=None,
-        help="Ablation preset: 1=Full, 2=w/o Solution, 3=w/o Visual, 4=Unanchored Concept, 5=Polluted Experience, 6=w/o 2PL-IRT",
+        help="Ablation preset: 0=Full, 1=w/o All Multimodal (Pure KC), 2=w/o Solution, 3=w/o Visual, 4=Unanchored Concept, 5=Polluted Experience, 6=w/o 2PL-IRT",
     )
+    parser.add_argument("--wo-all-multimodal", action="store_true", help="Ablation 1: Disable all multimodal inputs (Pure KC)")
     parser.add_argument("--wo-solution", action="store_true", help="Ablation 2: Disable solution algorithmic stream")
     parser.add_argument("--wo-visual", action="store_true", help="Ablation 3: Disable text-guided visual stream")
     parser.add_argument("--unanchored-concept", action="store_true", help="Ablation 4: Learn unanchored concept difficulty and disable lambda_sparse")
@@ -101,13 +102,26 @@ def main():
     # Resolve Ablation Preset and flags
     ablation_suffix = ""
     if args.ablation is not None:
-        if args.ablation == 1:
+        if args.ablation == 0:
             ablation_suffix = ""
+        elif args.ablation == 1:
+            model_cfg["use_multimodal"] = False
+            train_cfg["beta_d"] = 0.0
+            train_cfg["lambda_sparse"] = 0.0
+            train_cfg["p_drop"] = 0.0
+            model_cfg["p_visual_drop"] = 0.0
+            ablation_suffix = "_ablation1_wo_all_multimodal"
         elif args.ablation == 2:
             model_cfg["use_solution"] = False
+            train_cfg["beta_d"] = 0.20
+            train_cfg["lambda_sparse"] = 0.01
             ablation_suffix = "_ablation2_wo_solution"
         elif args.ablation == 3:
             model_cfg["use_visual"] = False
+            train_cfg["beta_d"] = 0.20
+            train_cfg["lambda_sparse"] = 0.01
+            train_cfg["p_drop"] = 0.0
+            model_cfg["p_visual_drop"] = 0.0
             ablation_suffix = "_ablation3_wo_visual"
         elif args.ablation == 4:
             model_cfg["unanchored_concept"] = True
@@ -121,12 +135,21 @@ def main():
             ablation_suffix = "_ablation6_wo_2pl_irt"
 
     # Apply individual ablation flags if set
+    if args.wo_all_multimodal:
+        model_cfg["use_multimodal"] = False
+        train_cfg["beta_d"] = 0.0
+        train_cfg["lambda_sparse"] = 0.0
+        train_cfg["p_drop"] = 0.0
+        model_cfg["p_visual_drop"] = 0.0
+        ablation_suffix = ablation_suffix or "_ablation1_wo_all_multimodal"
     if args.wo_solution:
         model_cfg["use_solution"] = False
-        ablation_suffix = ablation_suffix or "_wo_solution"
+        ablation_suffix = ablation_suffix or "_ablation2_wo_solution"
     if args.wo_visual:
         model_cfg["use_visual"] = False
-        ablation_suffix = ablation_suffix or "_wo_visual"
+        train_cfg["p_drop"] = 0.0
+        model_cfg["p_visual_drop"] = 0.0
+        ablation_suffix = ablation_suffix or "_ablation3_wo_visual"
     if args.unanchored_concept:
         model_cfg["unanchored_concept"] = True
         train_cfg["lambda_sparse"] = 0.0
@@ -143,6 +166,8 @@ def main():
         save_dir = args.save_dir
     elif train_cfg.get("save_dir") is not None:
         save_dir = train_cfg["save_dir"]
+        if ablation_suffix and not save_dir.endswith(ablation_suffix):
+            save_dir = f"{save_dir}{ablation_suffix}"
     else:
         save_dir = f"outputs/checkpoints/acd_mmkt_v3_fold{val_fold}{ablation_suffix}"
 
@@ -201,6 +226,7 @@ def main():
         hgnn_layers=model_cfg.get("hgnn_layers", 2),
         gamma_vis=model_cfg.get("gamma_vis", 1.5),
         delta_a=model_cfg.get("delta_a", 0.1),
+        use_multimodal=model_cfg.get("use_multimodal", True),
         use_solution=model_cfg.get("use_solution", True),
         use_visual=model_cfg.get("use_visual", True),
         unanchored_concept=model_cfg.get("unanchored_concept", False),

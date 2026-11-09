@@ -29,7 +29,7 @@ import subprocess
 import sys
 import time
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import scipy.stats as stats
@@ -50,13 +50,62 @@ from src.utils.seed import set_seed
 
 
 ABLATION_SUFFIX_MAP = {
-    1: "",
+    1: "_ablation1_wo_all_multimodal",
     2: "_ablation2_wo_solution",
     3: "_ablation3_wo_visual",
     4: "_ablation4_unanchored",
     5: "_ablation5_polluted_exp",
     6: "_ablation6_wo_2pl_irt",
 }
+
+
+def resolve_ablation_preset(
+    ablation_arg: Optional[Union[int, str]],
+    model_cfg: Dict[str, Any],
+    train_cfg: Dict[str, Any],
+) -> Tuple[str, str, str]:
+    """
+    Map ablation study argument to configuration overrides, checkpoint folder, and report suffix.
+    Guarantees that full model checkpoints (acd_mmkt_v3_full_5fold) are NEVER overwritten.
+
+    Returns:
+        (folder_name, report_suffix, display_title)
+    """
+    if ablation_arg is None or str(ablation_arg).lower() in ["full", "0"]:
+        return "acd_mmkt_v3_full_5fold", "", "Full ACD-MMKTv3"
+
+    ab_str = str(ablation_arg).lower().strip()
+    if ab_str in ["1", "wo_all_multimodal", "pure_kc", "ablation1"]:
+        model_cfg["use_multimodal"] = False
+        train_cfg["beta_d"] = 0.0
+        train_cfg["lambda_sparse"] = 0.0
+        train_cfg["p_drop"] = 0.0
+        model_cfg["p_visual_drop"] = 0.0
+        return "acd_mmkt_v3_ablation1_wo_all_multimodal_5fold", "_ablation1_wo_all_multimodal", "Ablation 1: w/o All Multimodal (Pure KC)"
+    elif ab_str in ["2", "wo_solution", "ablation2"]:
+        model_cfg["use_solution"] = False
+        train_cfg["beta_d"] = 0.20
+        train_cfg["lambda_sparse"] = 0.01
+        return "acd_mmkt_v3_ablation2_wo_solution_5fold", "_ablation2_wo_solution", "Ablation 2: w/o Solution Stream"
+    elif ab_str in ["3", "wo_visual", "ablation3"]:
+        model_cfg["use_visual"] = False
+        train_cfg["beta_d"] = 0.20
+        train_cfg["lambda_sparse"] = 0.01
+        train_cfg["p_drop"] = 0.0
+        model_cfg["p_visual_drop"] = 0.0
+        return "acd_mmkt_v3_ablation3_wo_visual_5fold", "_ablation3_wo_visual", "Ablation 3: w/o Visual Stream"
+    elif ab_str in ["4", "unanchored", "ablation4"]:
+        model_cfg["unanchored_concept"] = True
+        train_cfg["lambda_sparse"] = 0.0
+        return "acd_mmkt_v3_ablation4_unanchored_5fold", "_ablation4_unanchored", "Ablation 4: Unanchored Concept"
+    elif ab_str in ["5", "polluted_exp", "ablation5"]:
+        model_cfg["polluted_experience_attn"] = True
+        return "acd_mmkt_v3_ablation5_polluted_exp_5fold", "_ablation5_polluted_exp", "Ablation 5: Polluted Experience"
+    elif ab_str in ["6", "wo_2pl_irt", "ablation6"]:
+        model_cfg["use_deep_irt"] = False
+        return "acd_mmkt_v3_ablation6_wo_2pl_irt_5fold", "_ablation6_wo_2pl_irt", "Ablation 6: w/o 2PL-IRT"
+    else:
+        raise ValueError(f"Unknown ablation preset: {ablation_arg}")
 
 
 def parse_args():
@@ -95,13 +144,12 @@ def parse_args():
     parser.add_argument("--precision", type=str, choices=["fp32", "amp_fp16", "amp_bf16"], default=None, help="Compute precision")
     parser.add_argument("--worker-only", action="store_true", help="Internal flag: worker only executes assigned folds")
 
-    # Ablation presets
+    # Ablation presets (integer or string)
     parser.add_argument(
         "--ablation",
-        type=int,
-        choices=[1, 2, 3, 4, 5, 6],
+        type=str,
         default=None,
-        help="Ablation preset: 1=Full, 2=w/o Solution, 3=w/o Visual, 4=Unanchored Concept, 5=Polluted Experience, 6=w/o 2PL-IRT",
+        help="Ablation preset: '1' / 'wo_all_multimodal', '2' / 'wo_solution', '3' / 'wo_visual', '4' / 'unanchored', '5' / 'polluted_exp', '6' / 'wo_2pl_irt'",
     )
     return parser.parse_args()
 
@@ -193,8 +241,24 @@ def load_real_benchmarks_from_reports(base_reports_dir: str = "outputs/reports")
         except Exception as e:
             print(f"[Warning] Failed to parse MG-MMKT v2 report {mg_v2_path}: {e}")
 
-    # 4. Other standard pyKT baselines: Mark as pending if no 5-fold evaluation is on disk
-    expected_baselines = ["DKT", "DKVMN", "SAKT", "MG-MMKT", "MG-MMKTv2", "SAINT", "GKT", "SparseKT"]
+    # 4. Full ACD-MMKTv3
+    acd_v3_full_path = os.path.join(base_reports_dir, "v3_full_5fold", "acd_mmkt_v3_5fold_report.json")
+    if os.path.exists(acd_v3_full_path):
+        try:
+            with open(acd_v3_full_path, "r", encoding="utf-8") as f:
+                v3_data = json.load(f)
+            if "single_fold_metrics" in v3_data and len(v3_data["single_fold_metrics"]) == 5:
+                aucs = [float(v3_data["single_fold_metrics"][f"fold_{i}"]["auc"]) for i in range(5)]
+                benchmarks["Full ACD-MMKTv3"] = {
+                    "fold_aucs": aucs,
+                    "status": "available",
+                    "source": acd_v3_full_path,
+                }
+        except Exception as e:
+            print(f"[Warning] Failed to parse Full ACD-MMKTv3 report {acd_v3_full_path}: {e}")
+
+    # 5. Other standard pyKT baselines: Mark as pending if no 5-fold evaluation is on disk
+    expected_baselines = ["DKT", "DKVMN", "SAKT", "MG-MMKT", "MG-MMKTv2", "Full ACD-MMKTv3", "SAINT", "GKT", "SparseKT"]
     for expected in expected_baselines:
         if expected not in benchmarks:
             benchmarks[expected] = {
@@ -225,8 +289,13 @@ def train_and_eval_single_fold(
     logger.info(f"=== PROCESSING FOLD {val_fold} ON DEVICE {device_str} ===")
 
     data_dir = dataset_cfg.get("data_dir", "data/processed/XES3G5M")
-    suffix = ABLATION_SUFFIX_MAP.get(args.ablation, "")
-    fold_save_dir = os.path.join(args.checkpoint_dir, f"acd_mmkt_v3_fold{val_fold}{suffix}")
+    exp_folder = getattr(args, "exp_folder", "acd_mmkt_v3_full_5fold")
+    if os.path.basename(args.checkpoint_dir) == exp_folder:
+        base_ckpt_dir = args.checkpoint_dir
+    else:
+        base_ckpt_dir = os.path.join(args.checkpoint_dir, exp_folder)
+
+    fold_save_dir = os.path.join(base_ckpt_dir, f"acd_mmkt_v3_fold{val_fold}")
     best_model_path = os.path.join(fold_save_dir, "best_model.pt")
     pred_save_path = os.path.join(fold_save_dir, "test_predictions.npy")
     target_save_path = os.path.join(fold_save_dir, "test_targets.npy")
@@ -291,6 +360,7 @@ def train_and_eval_single_fold(
         delta_a=model_cfg.get("delta_a", 0.1),
         use_solution=model_cfg.get("use_solution", True),
         use_visual=model_cfg.get("use_visual", True),
+        use_multimodal=model_cfg.get("use_multimodal", True),
         unanchored_concept=model_cfg.get("unanchored_concept", False),
         polluted_experience_attn=model_cfg.get("polluted_experience_attn", False),
         use_deep_irt=model_cfg.get("use_deep_irt", True),
@@ -526,14 +596,20 @@ def main():
     seed = train_cfg.get("seed", 42)
     set_seed(seed)
 
+    # Resolve ablation preset overrides and directories
+    exp_folder, suffix, display_title = resolve_ablation_preset(args.ablation, model_cfg, train_cfg)
+    args.exp_folder = exp_folder
+    args.ablation_suffix = suffix
+    args.display_title = display_title
+
     # Configure file logging
-    suffix = ABLATION_SUFFIX_MAP.get(args.ablation, "")
     log_file = os.path.join(
         "outputs",
         "logs",
         f"run_5fold_acd_mmkt_v3{suffix}.log",
     )
     logger = get_logger("run_5fold_acd_mmkt_v3", log_file=log_file)
+    logger.info(f"Target Architecture Preset: {display_title} (Folder: {exp_folder})")
 
     # Apply hardware profile if specified
     if args.profile and "profiles" in train_cfg and args.profile in train_cfg["profiles"]:
@@ -553,21 +629,6 @@ def main():
         train_cfg["grad_accum_steps"] = args.grad_accum_steps
     if args.num_workers is not None:
         train_cfg["num_workers"] = args.num_workers
-
-    # Apply ablation overrides
-    if args.ablation is not None:
-        logger.info(f"Applying Ablation Preset {args.ablation}:")
-        if args.ablation == 2:
-            model_cfg["use_solution"] = False
-        elif args.ablation == 3:
-            model_cfg["use_visual"] = False
-        elif args.ablation == 4:
-            model_cfg["unanchored_concept"] = True
-            train_cfg["lambda_sparse"] = 0.0
-        elif args.ablation == 5:
-            model_cfg["polluted_experience_attn"] = True
-        elif args.ablation == 6:
-            model_cfg["use_deep_irt"] = False
 
     # Check Dual-GPU request
     if args.dual_gpu and not args.worker_only:
@@ -687,7 +748,8 @@ def main():
     os.makedirs(args.output_report_dir, exist_ok=True)
     report_data = {
         "model_name": "ACD-MMKTv3",
-        "ablation_preset": args.ablation or 1,
+        "ablation_preset": args.ablation or "full",
+        "display_title": getattr(args, "display_title", "Full ACD-MMKTv3"),
         "single_fold_metrics": fold_metrics,
         "mean_metrics": {
             "auc": mean_auc,
@@ -703,7 +765,7 @@ def main():
         "total_time_mins": (time.time() - t0) / 60,
     }
 
-    suffix = ABLATION_SUFFIX_MAP.get(args.ablation, "")
+    suffix = getattr(args, "ablation_suffix", "")
     report_path_json = os.path.join(args.output_report_dir, f"acd_mmkt_v3_5fold_report{suffix}.json")
     report_path_md = os.path.join(args.output_report_dir, f"acd_mmkt_v3_5fold_report{suffix}.md")
 

@@ -19,8 +19,9 @@ p_visual_drop: 0.15
 
 # Modality & Ablation Flags (all defaults for full ACD-MMKTv3)
 post_diag_mode: "none"             # "none" for standard unpolluted benchmark, "behavioral" enables causal post-diagnostic vector
-use_solution: true               # Ablation 2: false disables solution algorithmic stream (Delta_mu_sol=0, no v_sol in d^q or a_q)
-use_visual: true                 # Ablation 3: false disables text-guided visual stream (lambda_q=0, Delta_mu_vis=0)
+use_multimodal: true               # Ablation 1: false disables all multimodal content (pure KC-interaction baseline)
+use_solution: true                 # Ablation 2: false disables solution algorithmic stream (Delta_mu_sol=0, no v_sol in d^q or a_q)
+use_visual: true                   # Ablation 3: false disables text-guided visual stream (lambda_q=0, Delta_mu_vis=0)
 unanchored_concept: false        # Ablation 4: true disables fixed logit(mu_prior) anchor (uses free projection from c_C) and sets lambda_sparse=0
 polluted_experience_attn: false  # Ablation 5: true passes y_tau through causal self-attention (pollutes atomic history)
 use_deep_irt: true               # Ablation 6: false replaces monotonic 2PL-IRT with black-box MLP [h_t || x_tilde_t]

@@ -40,6 +40,7 @@ class Identifiable2PLIRT(nn.Module):
         delta_a: float = 0.1,
         use_deep_irt: bool = True,
         use_solution: bool = True,
+        use_multimodal: bool = True,
         initial_bias_a: float = 0.5413,  # Softplus(0.5413) ~ 1.0 (standard 2PL baseline)
     ):
         """
@@ -50,6 +51,7 @@ class Identifiable2PLIRT(nn.Module):
             delta_a: Positive discrimination floor (default: 0.1).
             use_deep_irt: Whether to use monotonic 2PL-IRT readout (Ablation 6 flag).
             use_solution: Whether solution stream is available (Ablation 2 flag).
+            use_multimodal: Whether multimodal stream is available (Ablation 1 flag).
             initial_bias_a: Initial bias for item discrimination.
         """
         super().__init__()
@@ -57,11 +59,13 @@ class Identifiable2PLIRT(nn.Module):
         self.delta_a = delta_a
         self.use_deep_irt = use_deep_irt
         self.use_solution = use_solution
+        self.use_multimodal = use_multimodal
 
         if self.use_deep_irt:
-            # Multi-trait Hadamard interaction: W_h h_t \odot W_k [c_C || d^q]
+            # Multi-trait Hadamard interaction: W_h h_t \odot W_k k_target
             self.W_h = nn.Linear(d_model, d_model, bias=False)
-            self.W_k = nn.Linear(2 * d_model, d_model, bias=False)
+            k_in_dim = d_model if not self.use_multimodal else (2 * d_model)
+            self.W_k = nn.Linear(k_in_dim, d_model, bias=False)
             self.b_z = nn.Parameter(torch.zeros(d_model))
 
             # Learner ability theta readout
@@ -69,8 +73,14 @@ class Identifiable2PLIRT(nn.Module):
             nn.init.normal_(self.fc_theta.weight, std=0.02)
             nn.init.constant_(self.fc_theta.bias, 0.0)
 
-            # Item discrimination a_q readout from [c_C || v_stem || v_sol]
-            disc_in_dim = 3 * d_model if self.use_solution else 2 * d_model
+            # Item discrimination a_q readout
+            if not self.use_multimodal:
+                disc_in_dim = d_model
+            elif self.use_solution:
+                disc_in_dim = 3 * d_model
+            else:
+                disc_in_dim = 2 * d_model
+
             self.fc_a = nn.Linear(disc_in_dim, 1, bias=True)
             nn.init.normal_(self.fc_a.weight, std=0.02)
             nn.init.constant_(self.fc_a.bias, initial_bias_a)
@@ -116,13 +126,19 @@ class Identifiable2PLIRT(nn.Module):
         if self.use_deep_irt:
             # 1. Learner Ability theta_{u,t} via Hadamard interaction
             proj_h = self.W_h(h_t)                                    # [..., d_model]
-            k_target = torch.cat([c_C_t, d_q_t], dim=-1)             # [..., 2*d_model]
+            if not self.use_multimodal:
+                k_target = c_C_t                                      # [..., d_model]
+            else:
+                k_target = torch.cat([c_C_t, d_q_t], dim=-1)         # [..., 2*d_model]
+
             proj_k = self.W_k(k_target)                              # [..., d_model]
             z_int = torch.tanh(proj_h * proj_k + self.b_z)           # [..., d_model]
             theta = self.fc_theta(z_int).squeeze(-1).float()         # [...]
 
             # 2. Item Discrimination a_{q_t} strictly positive
-            if self.use_solution:
+            if not self.use_multimodal:
+                disc_in = c_C_t                                       # [..., d_model]
+            elif self.use_solution:
                 disc_in = torch.cat([c_C_t, v_stem_t, v_sol_t], dim=-1)  # [..., 3*d_model]
             else:
                 disc_in = torch.cat([c_C_t, v_stem_t], dim=-1)          # [..., 2*d_model]

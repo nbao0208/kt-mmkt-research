@@ -102,23 +102,26 @@ class ACDv3ExplainabilityEngine:
         beta_q = tier3["beta_txt_q"]
         top_q_indices = np.argsort(beta_q)[::-1]
         stem_keywords = []
-        for idx in top_q_indices:
-            tok = tokens_q[idx] if idx < len(tokens_q) else f"tok_{idx}"
-            if tok in ("[PAD]", "[CLS]", "[SEP]"):
-                continue
-            stem_keywords.append({
-                "token": tok,
-                "token_idx": int(idx),
-                "weight": float(beta_q[idx]),
-            })
-            if len(stem_keywords) >= top_k_keywords:
-                break
+        if getattr(self.model, "use_multimodal", True):
+            for idx in top_q_indices:
+                if beta_q[idx] <= 1e-8:
+                    continue
+                tok = tokens_q[idx] if idx < len(tokens_q) else f"tok_{idx}"
+                if tok in ("[PAD]", "[CLS]", "[SEP]"):
+                    continue
+                stem_keywords.append({
+                    "token": tok,
+                    "token_idx": int(idx),
+                    "weight": float(beta_q[idx]),
+                })
+                if len(stem_keywords) >= top_k_keywords:
+                    break
 
         # Top solution steps
         beta_s = tier3["beta_txt_s"]
         top_s_indices = np.argsort(beta_s)[::-1]
         solution_steps = []
-        if getattr(self.model, "use_solution", True):
+        if getattr(self.model, "use_multimodal", True) and getattr(self.model, "use_solution", True):
             for idx in top_s_indices:
                 if beta_s[idx] <= 1e-8:
                     continue
@@ -175,8 +178,17 @@ class ACDv3ExplainabilityEngine:
         else:
             has_stem_img = False
 
+        use_mm = getattr(self.model, "use_multimodal", True)
+        use_vis = getattr(self.model, "use_visual", True)
         delta_vis = float(tier3["delta_mu_vis"])
-        if not has_stem_img:
+
+        if not use_mm:
+            vis_semantics = "Visual channel disabled (Ablation 1: w/o All Multimodal / Pure KC)"
+            delta_vis = 0.0
+        elif not use_vis:
+            vis_semantics = "Visual channel disabled (Ablation 3: w/o Visual Stream)"
+            delta_vis = 0.0
+        elif not has_stem_img:
             vis_semantics = "Text-Only Item (Câu hỏi thuần văn bản — m_img^q = 0, Delta mu_vis = 0.0)"
             delta_vis = 0.0
         elif delta_vis < -0.05:
@@ -193,7 +205,7 @@ class ACDv3ExplainabilityEngine:
             "tier2_difficulty": tier2,
             "tier3_multimodal": {
                 "delta_mu_txt": tier3["delta_mu_txt"],
-                "delta_mu_vis": tier3["delta_mu_vis"],
+                "delta_mu_vis": delta_vis,
                 "visual_impact_semantics": vis_semantics,
                 "bar_lambda_q": tier3["bar_lambda_q"],
                 "stem_keywords": stem_keywords,
@@ -205,6 +217,10 @@ class ACDv3ExplainabilityEngine:
             "tier4_history": tier4,
         }
         return explanation
+
+    def format_explanation_report(self, explanation: Dict[str, Any]) -> str:
+        """Alias for format_markdown_report."""
+        return self.format_markdown_report(explanation)
 
     def format_markdown_report(self, explanation: Dict[str, Any]) -> str:
         """

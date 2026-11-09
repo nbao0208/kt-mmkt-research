@@ -80,7 +80,22 @@ def main():
     args = parse_args()
     log_dir = "outputs/logs"
     os.makedirs(log_dir, exist_ok=True)
-    logger = get_logger("evaluate_acd_mmkt_v3", log_file=os.path.join(log_dir, "evaluate_acd_mmkt_v3.log"))
+
+    # Derive log filename suffix if checkpoint belongs to an ablation variant
+    log_suffix = ""
+    for ab_tag in [
+        "_ablation1_wo_all_multimodal",
+        "_ablation2_wo_solution",
+        "_ablation3_wo_visual",
+        "_ablation4_unanchored",
+        "_ablation5_polluted_exp",
+        "_ablation6_wo_2pl_irt",
+    ]:
+        if ab_tag in args.checkpoint:
+            log_suffix = ab_tag
+            break
+    log_filename = f"evaluate_acd_mmkt_v3{log_suffix}.log"
+    logger = get_logger("evaluate_acd_mmkt_v3", log_file=os.path.join(log_dir, log_filename))
     logger.info("=== ACD-MMKTv3 Comprehensive Evaluation and Psychometric Analysis ===")
 
     # 1. Device Selection
@@ -154,6 +169,7 @@ def main():
         delta_a=model_cfg.get("delta_a", 0.1),
         use_solution=model_cfg.get("use_solution", True),
         use_visual=model_cfg.get("use_visual", True),
+        use_multimodal=model_cfg.get("use_multimodal", True),
         unanchored_concept=model_cfg.get("unanchored_concept", False),
         polluted_experience_attn=model_cfg.get("polluted_experience_attn", False),
         use_deep_irt=model_cfg.get("use_deep_irt", True),

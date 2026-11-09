@@ -42,6 +42,7 @@ class AtomicMonotonicRetriever(nn.Module):
         dropout: float = 0.15,
         polluted_experience_attn: bool = False,
         d_post_diag: int = 0,
+        use_multimodal: bool = True,
     ):
         """
         Initialize AtomicMonotonicRetriever.
@@ -53,12 +54,14 @@ class AtomicMonotonicRetriever(nn.Module):
             dropout: Dropout probability.
             polluted_experience_attn: Ablation 5 flag (w/ causal self-attention over experience).
             d_post_diag: Dimension of optional diagnostic post-response vector (0 = none/zero).
+            use_multimodal: Master switch for multimodal stream (Ablation 1 flag).
         """
         super().__init__()
         self.d_model = d_model
         self.num_heads = num_heads
         self.max_seq_len = max_seq_len
         self.polluted_experience_attn = polluted_experience_attn
+        self.use_multimodal = use_multimodal
         self.head_dim = d_model // num_heads
 
         # 3.1 Exercise Stream Causal Encoder
@@ -80,8 +83,12 @@ class AtomicMonotonicRetriever(nn.Module):
         nn.init.normal_(self.f_correct, std=0.02)
         nn.init.normal_(self.f_wrong, std=0.02)
 
-        self.W_exp_1 = nn.Linear(d_model, d_model, bias=False)
-        self.W_exp_0 = nn.Linear(d_model, d_model, bias=False)
+        if self.use_multimodal:
+            self.W_exp_1 = nn.Linear(d_model, d_model, bias=False)
+            self.W_exp_0 = nn.Linear(d_model, d_model, bias=False)
+        else:
+            self.W_exp_1 = None
+            self.W_exp_0 = None
         self.norm_y = nn.LayerNorm(d_model)
 
         # Optional post-diagnostic projection
@@ -144,8 +151,12 @@ class AtomicMonotonicRetriever(nn.Module):
         base_exp = c_C_seq + r_float * self.v_correct + (1.0 - r_float) * self.v_wrong  # [B, L, d_model]
 
         # Difficulty-modulated variation
-        mod_1 = self.f_correct + self.W_exp_1(d_q_seq)  # [B, L, d_model]
-        mod_0 = self.f_wrong + self.W_exp_0(d_q_seq)    # [B, L, d_model]
+        if self.use_multimodal and self.W_exp_1 is not None and self.W_exp_0 is not None:
+            mod_1 = self.f_correct + self.W_exp_1(d_q_seq)  # [B, L, d_model]
+            mod_0 = self.f_wrong + self.W_exp_0(d_q_seq)    # [B, L, d_model]
+        else:
+            mod_1 = self.f_correct
+            mod_0 = self.f_wrong
         mod_term = mu_float * (r_float * mod_1 + (1.0 - r_float) * mod_0)  # [B, L, d_model]
 
         y_atomic = base_exp + mod_term

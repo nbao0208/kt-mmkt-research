@@ -48,6 +48,7 @@ class ACDMMKTv3(nn.Module):
         delta_a: float = 0.1,
         use_solution: bool = True,
         use_visual: bool = True,
+        use_multimodal: bool = True,
         unanchored_concept: bool = False,
         polluted_experience_attn: bool = False,
         use_deep_irt: bool = True,
@@ -72,6 +73,7 @@ class ACDMMKTv3(nn.Module):
             delta_a: Minimum discrimination floor (0.1).
             use_solution: Ablation 2 flag (w/o solution algorithmic stream).
             use_visual: Ablation 3 flag (w/o text-guided visual stream).
+            use_multimodal: Ablation 1 flag (w/o all multimodal streams - pure KC).
             unanchored_concept: Ablation 4 flag (unanchored learned concept difficulty).
             polluted_experience_attn: Ablation 5 flag (polluted experience stream via self-attention).
             use_deep_irt: Ablation 6 flag (w/o monotonic 2PL-IRT readout).
@@ -89,6 +91,7 @@ class ACDMMKTv3(nn.Module):
         self.delta_a = delta_a
         self.use_solution = use_solution
         self.use_visual = use_visual
+        self.use_multimodal = use_multimodal
         self.unanchored_concept = unanchored_concept
         self.polluted_experience_attn = polluted_experience_attn
         self.use_deep_irt = use_deep_irt
@@ -135,6 +138,7 @@ class ACDMMKTv3(nn.Module):
             use_hypergraph=use_hypergraph,
             use_gram_schmidt=use_gram_schmidt,
             unanchored_concept=unanchored_concept,
+            use_multimodal=use_multimodal,
         )
 
         # Subsystem 1: Text-Guided Alignment & Cognitive Gating
@@ -146,6 +150,7 @@ class ACDMMKTv3(nn.Module):
             dropout=dropout,
             use_visual=use_visual,
             use_solution=use_solution,
+            use_multimodal=use_multimodal,
         )
 
         # Subsystem 3: Dual-Stream Asymmetric Encoder & Unpolluted Monotonic Knowledge Retriever
@@ -157,6 +162,7 @@ class ACDMMKTv3(nn.Module):
             dropout=dropout,
             d_post_diag=d_post_diag,
             polluted_experience_attn=polluted_experience_attn,
+            use_multimodal=use_multimodal,
         )
 
         # Subsystem 4.1: Identifiable Multi-Trait Psychometric Interaction & Monotonic 2PL-IRT
@@ -165,6 +171,7 @@ class ACDMMKTv3(nn.Module):
             delta_a=delta_a,
             use_deep_irt=use_deep_irt,
             use_solution=use_solution,
+            use_multimodal=use_multimodal,
         )
 
         # Evaluation item representation cache
@@ -173,7 +180,7 @@ class ACDMMKTv3(nn.Module):
     def compute_all_kc_embeddings(self) -> torch.Tensor:
         """Propagate hypergraph once across all 1,175 KCs."""
         return self.sub2.concept_encoder.compute_all_kc_embeddings(
-            raw_kc_emb=self.acd_kc_init_emb,
+            raw_kc_emb=self.acd_kc_init_emb if self.use_multimodal else None,
             hypergraph_G=self.acd_hypergraph_G,
         )
 
@@ -189,18 +196,8 @@ class ACDMMKTv3(nn.Module):
         q_ids = q_ids.long()
         M = q_ids.size(0)
 
-        E_txt_q = self.acd_E_txt_q[q_ids]
-        mask_txt_q = self.acd_mask_txt_q[q_ids]
-        E_img_q = self.acd_E_img_q[q_ids]
-        M_patch_q = self.bank_M_patch_q[q_ids]
-
-        E_txt_s = self.acd_E_txt_s[q_ids]
-        mask_txt_s = self.acd_mask_txt_s[q_ids]
-        E_img_s = self.acd_E_img_s[q_ids]
-
         leaf_kcs = self.bank_leaf_kcs[q_ids]
         leaf_kc_mask = self.bank_kc_mask[q_ids]
-        static_ctx = self.bank_static_ctx[q_ids]
 
         if modality_masks is None:
             mod_masks = self.bank_modality_masks[q_ids]
@@ -214,40 +211,78 @@ class ACDMMKTv3(nn.Module):
             leaf_kc_mask=leaf_kc_mask,
         )
 
-        # 2. Text-Guided Cross-Modal Alignment & Cognitive Gating (Subsystem 1)
-        sub1_out = self.sub1(
-            E_txt_q=E_txt_q,
-            mask_txt_q=mask_txt_q,
-            E_img_q=E_img_q,
-            M_patch_q=M_patch_q,
-            E_txt_s=E_txt_s,
-            mask_txt_s=mask_txt_s,
-            E_img_s=E_img_s,
-            modality_masks=mod_masks,
-            c_C=c_C,
-            c_ctx=static_ctx,
-            return_cross_weights=return_cross_weights,
-        )
-
-        # 3. Difficulty Decomposition & Gram-Schmidt Orthogonalization (Subsystem 2.2 & 2.3)
-        sub2_out = self.sub2(
-            v_stem=sub1_out["v_stem"],
-            v_sol=sub1_out["v_sol"],
-            u_txt_q=sub1_out["u_txt_q"],
-            u_cross_q=sub1_out["u_cross_q"],
-            bar_lambda_q=sub1_out["bar_lambda_q"],
-            m_img_q=mod_masks[:, 0:1],
-            c_C=c_C,
-            mu_concept_prior=mu_concept_prior,
-        )
-
-        # 4. Item Discrimination a_q (Subsystem 4.1 branch)
-        if self.use_solution:
-            disc_in = torch.cat([c_C, sub1_out["v_stem"], sub1_out["v_sol"]], dim=-1)
+        if not self.use_multimodal:
+            # Ablation 1: pure KC interaction, completely bypass Subsystem 1 and difficulty heads
+            zeros_vec = torch.zeros((M, self.d_model), device=q_ids.device, dtype=torch.float32)
+            zeros_bar = torch.zeros((M, 1), device=q_ids.device, dtype=torch.float32)
+            sub1_out = {
+                "v_stem": zeros_vec,
+                "v_sol": zeros_vec,
+                "lambda_q": zeros_vec,
+                "bar_lambda_q": zeros_bar,
+                "beta_txt_q": torch.zeros((M, 128), device=q_ids.device),
+                "beta_txt_s": torch.zeros((M, 160), device=q_ids.device),
+                "A_cross_q": None,
+                "u_txt_q": zeros_vec,
+                "u_cross_q": zeros_vec,
+            }
+            sub2_out = self.sub2(
+                v_stem=zeros_vec,
+                v_sol=zeros_vec,
+                u_txt_q=zeros_vec,
+                u_cross_q=zeros_vec,
+                bar_lambda_q=zeros_bar,
+                m_img_q=torch.zeros((M, 1), device=q_ids.device),
+                c_C=c_C,
+                mu_concept_prior=mu_concept_prior,
+            )
+            raw_a = self.sub4.fc_a(c_C).squeeze(-1).float() if self.use_deep_irt else torch.ones_like(sub2_out["tilde_mu"])
         else:
-            disc_in = torch.cat([c_C, sub1_out["v_stem"]], dim=-1)
+            E_txt_q = self.acd_E_txt_q[q_ids]
+            mask_txt_q = self.acd_mask_txt_q[q_ids]
+            E_img_q = self.acd_E_img_q[q_ids] if self.use_visual else None
+            M_patch_q = self.bank_M_patch_q[q_ids] if self.use_visual else None
 
-        raw_a = self.sub4.fc_a(disc_in).squeeze(-1).float() if self.use_deep_irt else torch.ones_like(sub2_out["tilde_mu"])
+            E_txt_s = self.acd_E_txt_s[q_ids] if self.use_solution else None
+            mask_txt_s = self.acd_mask_txt_s[q_ids] if self.use_solution else None
+            E_img_s = self.acd_E_img_s[q_ids] if (self.use_solution and self.use_visual) else None
+            static_ctx = self.bank_static_ctx[q_ids]
+
+            # 2. Text-Guided Cross-Modal Alignment & Cognitive Gating (Subsystem 1)
+            sub1_out = self.sub1(
+                E_txt_q=E_txt_q,
+                mask_txt_q=mask_txt_q,
+                E_img_q=E_img_q,
+                M_patch_q=M_patch_q,
+                E_txt_s=E_txt_s,
+                mask_txt_s=mask_txt_s,
+                E_img_s=E_img_s,
+                modality_masks=mod_masks,
+                c_C=c_C,
+                c_ctx=static_ctx,
+                return_cross_weights=return_cross_weights,
+            )
+
+            # 3. Difficulty Decomposition & Gram-Schmidt Orthogonalization (Subsystem 2.2 & 2.3)
+            sub2_out = self.sub2(
+                v_stem=sub1_out["v_stem"],
+                v_sol=sub1_out["v_sol"],
+                u_txt_q=sub1_out["u_txt_q"],
+                u_cross_q=sub1_out["u_cross_q"],
+                bar_lambda_q=sub1_out["bar_lambda_q"],
+                m_img_q=mod_masks[:, 0:1],
+                c_C=c_C,
+                mu_concept_prior=mu_concept_prior,
+            )
+
+            # 4. Item Discrimination a_q (Subsystem 4.1 branch)
+            if self.use_solution:
+                disc_in = torch.cat([c_C, sub1_out["v_stem"], sub1_out["v_sol"]], dim=-1)
+            else:
+                disc_in = torch.cat([c_C, sub1_out["v_stem"]], dim=-1)
+
+            raw_a = self.sub4.fc_a(disc_in).squeeze(-1).float() if self.use_deep_irt else torch.ones_like(sub2_out["tilde_mu"])
+
         a_q = F.softplus(raw_a) + self.delta_a if self.use_deep_irt else torch.ones_like(sub2_out["tilde_mu"])
 
         item_props = {
@@ -392,10 +427,10 @@ class ACDMMKTv3(nn.Module):
         else:
             batch_mu_concept = mu_concept_prior[q_seq].to(device)
 
-        # Check if batch specifies custom modality masks different from bank masks
+        # Check if batch specifies custom modality masks different from bank masks (evaluation counterfactual only)
         custom_masks = batch.get("modality_masks")
         has_custom_masks = False
-        if custom_masks is not None:
+        if not self.training and self.use_multimodal and self.use_visual and custom_masks is not None:
             active_q = q_seq[seq_mask.bool()] if seq_mask.bool().any() else q_seq.view(-1)
             if active_q.numel() > 0:
                 bank_masks_active = self.bank_modality_masks[active_q]
@@ -458,13 +493,14 @@ class ACDMMKTv3(nn.Module):
                 return_cross_weights=False,
             )
 
-            # 2. Dynamic modality dropout: only re-forward questions that actually dropped a channel
-            if self.training and self.p_drop > 0.0 and self.use_visual:
+            # 2. Dynamic modality dropout: only re-forward questions that actually dropped an active visual channel
+            if self.training and self.p_drop > 0.0 and self.use_visual and self.use_multimodal:
                 uniq_mod_masks = uniq_clean_masks.clone()
                 drop_q = (torch.rand(len(unique_q), device=device) >= self.p_drop).float()
                 uniq_mod_masks[:, 0] = uniq_mod_masks[:, 0] * drop_q
-                drop_s = (torch.rand(len(unique_q), device=device) >= self.p_drop).float()
-                uniq_mod_masks[:, 2] = uniq_mod_masks[:, 2] * drop_s
+                if self.use_solution:
+                    drop_s = (torch.rand(len(unique_q), device=device) >= self.p_drop).float()
+                    uniq_mod_masks[:, 2] = uniq_mod_masks[:, 2] * drop_s
 
                 dropped_sub_indices = torch.where((uniq_mod_masks != uniq_clean_masks).any(dim=-1))[0]
                 if len(dropped_sub_indices) > 0:
@@ -486,7 +522,7 @@ class ACDMMKTv3(nn.Module):
                             dyn_item_props[k][dropped_sub_indices] = v
                 else:
                     dyn_item_props = clean_item_props
-            elif has_custom_masks and custom_masks is not None:
+            elif has_custom_masks and custom_masks is not None and self.use_multimodal and self.use_visual:
                 uniq_mod_masks = uniq_clean_masks.clone()
                 for i_q, q_val in enumerate(unique_q):
                     pos = torch.where((q_seq == q_val) & valid_mask)

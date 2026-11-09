@@ -161,8 +161,16 @@ class ACDMMKTv3Trainer:
         self.model_cfg = model_cfg or {}
         self.warmup_epochs = warmup_epochs
         self.eta_min = eta_min
-        self.beta_d = beta_d
-        self.lambda_sparse = lambda_sparse
+
+        # Defensive guard: If multimodal stream is entirely disabled and unanchored is False,
+        # there are no learnable difficulty deviation heads (delta_mu = 0). Force beta_d=0, lambda_sparse=0.
+        if not getattr(model, "use_multimodal", True) and not getattr(model, "unanchored_concept", False):
+            self.beta_d = 0.0
+            self.lambda_sparse = 0.0
+        else:
+            self.beta_d = beta_d
+            self.lambda_sparse = lambda_sparse
+
         self.kappa = kappa
         self.logger = logger or get_logger("acd_v3_trainer")
 

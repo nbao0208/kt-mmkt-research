@@ -760,16 +760,26 @@ class ACDMMKTv3Loss(nn.Module):
             clean_delta_stem = clean_props["delta_mu_stem"]
             clean_delta_sol = clean_props["delta_mu_sol"]
 
-            target_n = n_q_all[unique_q].to(logits.device)
-            target_d = d_q_all[unique_q].to(logits.device)
-
-            if self.beta_d > 0.0:
+            if self.beta_d > 0.0 and (not torch.is_grad_enabled() or clean_tilde_mu.requires_grad):
+                n_dev = n_q_all.to(unique_q.device)
+                d_dev = d_q_all.to(unique_q.device)
+                target_n = n_dev[unique_q].to(logits.device)
+                target_d = d_dev[unique_q].to(logits.device)
                 l_diff = self.diff_loss_fn(clean_tilde_mu, target_d, target_n)
             else:
                 l_diff = torch.tensor(0.0, device=logits.device)
 
             if self.lambda_sparse > 0.0 and not unanchored_concept:
-                l_sparse = (clean_delta_stem.pow(2) + clean_delta_sol.pow(2)).mean()
+                sparse_terms = []
+                if clean_delta_stem is not None and (clean_delta_stem.requires_grad or (clean_delta_stem != 0).any()):
+                    sparse_terms.append(clean_delta_stem.pow(2))
+                if clean_delta_sol is not None and (clean_delta_sol.requires_grad or (clean_delta_sol != 0).any()):
+                    sparse_terms.append(clean_delta_sol.pow(2))
+
+                if len(sparse_terms) > 0:
+                    l_sparse = sum(sparse_terms).mean()
+                else:
+                    l_sparse = torch.tensor(0.0, device=logits.device)
             else:
                 l_sparse = torch.tensor(0.0, device=logits.device)
         else:
