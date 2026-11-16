@@ -1,20 +1,16 @@
 """
-CLI Entry Point for Training ACD-MMKTv3 on XES3G5M with pyKT 5-Fold Cross-Validation.
+CLI Entry Point for Training ACD-MMKTv3 on XES3G5M or Eedi (Task 3 & 4) with pyKT 5-Fold CV.
 Asymmetric Causal-Disentangled Multimodal Knowledge Tracing v3.
 
 Usage:
-    # Full End-to-End Training on Fold 0
+    # Full End-to-End Training on XES3G5M Fold 0
     conda run -n kt-research-env python scripts/train_acd_mmkt_v3.py --val-fold 0 --num-epochs 50
 
-    # With hardware profile for Apple Silicon (M-series MPS)
-    conda run -n kt-research-env python scripts/train_acd_mmkt_v3.py --val-fold 0 --profile m1_pro
+    # Full End-to-End Training on Eedi Fold 0 (with Apple Silicon MPS profile)
+    conda run -n kt-research-env python scripts/train_acd_mmkt_v3.py --dataset eedi --val-fold 0 --profile m1_pro
 
-    # Ablation Studies
-    conda run -n kt-research-env python scripts/train_acd_mmkt_v3.py --val-fold 0 --ablation 2  # w/o Solution Stream
-    conda run -n kt-research-env python scripts/train_acd_mmkt_v3.py --val-fold 0 --ablation 3  # w/o Text-Guided Visual Stream
-    conda run -n kt-research-env python scripts/train_acd_mmkt_v3.py --val-fold 0 --ablation 4  # Unanchored Free Concept Difficulty
-    conda run -n kt-research-env python scripts/train_acd_mmkt_v3.py --val-fold 0 --ablation 5  # Polluted Experience Self-Attention
-    conda run -n kt-research-env python scripts/train_acd_mmkt_v3.py --val-fold 0 --ablation 6  # w/o Monotonic 2PL-IRT
+    # Ablation Studies (works identically on both XES3G5M and Eedi)
+    conda run -n kt-research-env python scripts/train_acd_mmkt_v3.py --dataset eedi --val-fold 0 --ablation 2
 """
 
 import argparse
@@ -33,17 +29,24 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from src.utils.seed import set_seed
 from src.utils.logger import get_logger
 from src.utils.config import load_yaml_config
-from src.data.xes3g5m_dataset import get_xes3g5m_dataloaders
+from src.data.dataset_router import (
+    resolve_dataset_key,
+    resolve_dataset_paths,
+    get_dataloaders_for_dataset,
+)
 from src.models.mmkt.acd_mmkt_v3 import ACDMMKTv3
 from src.training.acd_v3_trainer import ACDMMKTv3Trainer
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Train ACD-MMKTv3 on XES3G5M dataset.")
+    parser = argparse.ArgumentParser(description="Train ACD-MMKTv3 on XES3G5M or Eedi dataset.")
+    parser.add_argument("--dataset", type=str, choices=["xes3g5m", "eedi"], default=None, help="Target dataset shortcut ('xes3g5m' or 'eedi')")
     parser.add_argument("--config-model", type=str, default="configs/model/acd_mmkt_v3.yaml", help="Path to model config")
-    parser.add_argument("--config-train", type=str, default="configs/train_acd_mmkt_v3.yaml", help="Path to training config")
-    parser.add_argument("--config-dataset", type=str, default="configs/dataset/xes3g5m.yaml", help="Path to dataset config")
+    parser.add_argument("--config-train", type=str, default=None, help="Path to training config")
+    parser.add_argument("--config-dataset", type=str, default=None, help="Path to dataset config")
     parser.add_argument("--val-fold", type=int, default=None, help="Designated validation fold (0..4)")
+    parser.add_argument("--test-split", type=str, choices=["unified", "public", "private"], default=None, help="Eedi test split ('unified', 'public', or 'private')")
+    parser.add_argument("--post-diag-mode", type=str, choices=["none", "behavioral", "diagnostic"], default=None, help="Override post-response diagnostic vector mode")
     parser.add_argument("--num-epochs", type=int, default=None, help="Number of training epochs")
     parser.add_argument("--batch-size", type=int, default=None, help="Mini-batch size")
     parser.add_argument("--lr", type=float, default=None, help="Learning rate")
@@ -76,10 +79,24 @@ def parse_args():
 def main():
     args = parse_args()
 
-    # 1. Load Configurations
+    # 1. Resolve Dataset & Load Configurations
+    config_dataset_path = args.config_dataset
+    if config_dataset_path is None:
+        config_dataset_path = "configs/dataset/eedi_task34.yaml" if args.dataset == "eedi" else "configs/dataset/xes3g5m.yaml"
+    dataset_cfg = load_yaml_config(config_dataset_path)
+    dataset_key = resolve_dataset_key(dataset_cfg=dataset_cfg, dataset_arg=args.dataset)
+
+    config_train_path = args.config_train
+    if config_train_path is None:
+        eedi_train_cfg = "configs/train_acd_mmkt_v3_eedi.yaml"
+        if dataset_key == "eedi" and os.path.exists(eedi_train_cfg):
+            config_train_path = eedi_train_cfg
+        else:
+            config_train_path = "configs/train_acd_mmkt_v3.yaml"
+
     model_cfg = load_yaml_config(args.config_model)
-    train_cfg = load_yaml_config(args.config_train)
-    dataset_cfg = load_yaml_config(args.config_dataset)
+    train_cfg = load_yaml_config(config_train_path)
+    paths = resolve_dataset_paths(dataset_key=dataset_key, dataset_cfg=dataset_cfg, train_cfg=train_cfg)
 
     # Apply hardware profile if selected
     if args.profile and "profiles" in train_cfg and args.profile in train_cfg["profiles"]:
@@ -98,6 +115,17 @@ def main():
     precision = args.precision if args.precision is not None else train_cfg.get("precision", "fp32")
     grad_accum_steps = args.grad_accum_steps if args.grad_accum_steps is not None else train_cfg.get("grad_accum_steps", 1)
     num_workers = args.num_workers if args.num_workers is not None else train_cfg.get("num_workers", 0)
+    test_split = args.test_split or train_cfg.get("test_split", "unified")
+
+    if args.post_diag_mode is not None:
+        model_cfg["post_diag_mode"] = args.post_diag_mode
+    elif "post_diag_mode" in train_cfg and train_cfg["post_diag_mode"] is not None:
+        model_cfg["post_diag_mode"] = train_cfg["post_diag_mode"]
+
+    # Record dataset identity in model_cfg for checkpoint restoration
+    model_cfg["dataset_name"] = paths["display_name"]
+    model_cfg["num_questions"] = dataset_cfg.get("num_questions", model_cfg.get("num_questions", 7652))
+    model_cfg["num_kcs"] = dataset_cfg.get("num_kcs", model_cfg.get("num_kcs", 1175))
 
     # Resolve Ablation Preset and flags
     ablation_suffix = ""
@@ -161,7 +189,7 @@ def main():
         model_cfg["use_deep_irt"] = False
         ablation_suffix = ablation_suffix or "_wo_2pl_irt"
 
-    # Dynamic save_dir per fold and ablation
+    # Dynamic save_dir per dataset, fold, and ablation
     if args.save_dir is not None:
         save_dir = args.save_dir
     elif train_cfg.get("save_dir") is not None:
@@ -169,15 +197,16 @@ def main():
         if ablation_suffix and not save_dir.endswith(ablation_suffix):
             save_dir = f"{save_dir}{ablation_suffix}"
     else:
-        save_dir = f"outputs/checkpoints/acd_mmkt_v3_fold{val_fold}{ablation_suffix}"
+        save_dir = os.path.join(paths["checkpoint_dir"], f"acd_mmkt_v3_fold{val_fold}{ablation_suffix}")
 
-    log_dir = train_cfg.get("log_dir", "outputs/logs")
+    log_dir = paths["log_dir"]
     os.makedirs(log_dir, exist_ok=True)
     log_file = os.path.join(log_dir, f"train_acd_mmkt_v3_fold{val_fold}{ablation_suffix}.log")
-    logger = get_logger(f"train_v3_f{val_fold}", log_file=log_file)
+    logger = get_logger(f"train_v3_{dataset_key}_f{val_fold}", log_file=log_file)
 
     if args.profile:
         logger.info(f"Applied hardware profile '{args.profile}'.")
+    logger.info(f"Dataset: {paths['display_name']} (key={dataset_key}) | post_diag_mode={model_cfg.get('post_diag_mode', 'none')}")
     logger.info(f"Target Checkpoint Directory: {save_dir}")
 
     # Synchronize p_drop across configs
@@ -186,22 +215,24 @@ def main():
     model_cfg["p_visual_drop"] = p_drop
     model_cfg["p_drop"] = p_drop
 
-    data_dir = dataset_cfg.get("data_dir", "data/processed/XES3G5M")
+    data_dir = paths["data_dir"]
 
     # Set Reproducibility Seed
     set_seed(seed)
 
     # 2. Construct DataLoaders
-    logger.info(f"Loading XES3G5M data from {data_dir} for Validation Fold {val_fold} (model_type='acd_mmkt_v3')...")
-    train_loader, val_loader, test_loader, static_item_bank = get_xes3g5m_dataloaders(
+    logger.info(f"Loading {paths['display_name']} data from {data_dir} for Validation Fold {val_fold} (model_type='acd_mmkt_v3')...")
+    train_loader, val_loader, test_loader, static_item_bank = get_dataloaders_for_dataset(
+        dataset_key=dataset_key,
         data_dir=data_dir,
         val_fold=val_fold,
         model_type="acd_mmkt_v3",
         batch_size=batch_size,
         test_batch_size=test_batch_size,
         p_drop=p_drop,
-        test_stride=train_cfg.get("test_stride", 100),
+        test_stride=train_cfg.get("test_stride", dataset_cfg.get("test_stride", 100)),
         num_workers=num_workers,
+        test_split=test_split,
     )
 
     # Retrieve fold statistics

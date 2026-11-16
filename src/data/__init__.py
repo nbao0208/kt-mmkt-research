@@ -18,6 +18,14 @@ from src.data.eedi_dataset import (
     load_eedi_static_item_bank,
 )
 from src.data.eedi_preprocessor import EediTask34Preprocessor
+from src.data.dataset_router import (
+    resolve_dataset_key,
+    resolve_dataset_paths,
+    resolve_split_tag,
+    load_static_item_bank_for_dataset,
+    get_dataloaders_for_dataset,
+    load_acd_v3_fold_metadata,
+)
 
 try:
     from src.data.pykt_dataset import (
@@ -43,6 +51,12 @@ __all__ = [
     "create_eedi_mg_static_item_bank",
     "load_eedi_static_item_bank",
     "EediTask34Preprocessor",
+    "resolve_dataset_key",
+    "resolve_dataset_paths",
+    "resolve_split_tag",
+    "load_static_item_bank_for_dataset",
+    "get_dataloaders_for_dataset",
+    "load_acd_v3_fold_metadata",
     "get_pykt_dataloaders",
     "load_test_grouped_data",
     "load_stratification_metadata",

@@ -1,9 +1,9 @@
 """
-Comprehensive Pipeline for ACD-MMKTv3 Modality Ablation Studies on XES3G5M.
+Comprehensive Pipeline for ACD-MMKTv3 Modality Ablation Studies on XES3G5M & Eedi (Task 3 & 4).
 Asymmetric Causal-Disentangled Multimodal Knowledge Tracing v3.
 
 Executes all requirements of plans/acd_mmkt_v3_ablation_study_plan.md and
-reviews/acd_mmkt_v3_ablation_study_plan_review.md (Rounds 1 & 2):
+plans/eedi_task34_mmkt_preprocessing_plan.md:
 1. Pure Pruning Compliance & Zero-Leakage Modality Isolation across 3 Ablation Variants:
    - Ablation 1: w/o All Multimodal (Pure KC-Interaction)
    - Ablation 2: w/o Solution Stream (Question Stem Multimodal Only)
@@ -12,7 +12,7 @@ reviews/acd_mmkt_v3_ablation_study_plan_review.md (Rounds 1 & 2):
    - Full training from scratch using ACDMMKTv3Trainer (seed=42, warmup=2, cosine decay, patience=10).
    - High-throughput offline evaluation with precomputed static item-bank cache.
    - Support for --eval-only mode to load and evaluate existing checkpoints without retraining.
-3. 5-Fold Soft Probability Ensemble on independent test set (1,099,197 interactions, 3,613 students).
+3. 5-Fold Soft Probability Ensemble on independent test set (1,099,197 on XES3G5M; 124,960 unified on Eedi).
 4. 4-Tier Multidimensional Pedagogical Stratification (Visual, Frequency, Remedial, Psychometrics),
    including Full Model baseline comparisons and signed visual cognitive load slices
    (Delta mu_vis < 0 vs Delta mu_vis > 0).
@@ -39,9 +39,16 @@ import torch.nn as nn
 # Ensure project root is in sys.path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from src.data.xes3g5m_dataset import get_xes3g5m_dataloaders, load_static_item_bank_optimized
+from src.data.dataset_router import (
+    resolve_dataset_key,
+    resolve_dataset_paths,
+    resolve_split_tag,
+    get_dataloaders_for_dataset,
+    load_static_item_bank_for_dataset,
+)
 from src.evaluation.metrics import calculate_metrics
-from src.evaluation.unified_test_benchmark import TestContext, NUM_TEST_INTERACTIONS
+from src.evaluation.unified_test_benchmark import TestContext
+from src.evaluation.eedi_test_context import EediTestContext, evaluate_task3_expert_pairs
 from src.evaluation.benchmark_statistics import (
     compute_binary_metrics,
     student_macro_auc,
@@ -119,31 +126,77 @@ class ModalityAblationPipeline:
     def __init__(
         self,
         config_model_path: str = "configs/model/acd_mmkt_v3.yaml",
-        config_train_path: str = "configs/train_acd_mmkt_v3.yaml",
-        config_dataset_path: str = "configs/dataset/xes3g5m.yaml",
-        full_ckpt_base: str = "outputs/checkpoints/acd_mmkt_v3_full_5fold",
+        config_train_path: Optional[str] = None,
+        config_dataset_path: Optional[str] = None,
+        dataset_arg: Optional[str] = None,
+        test_split: str = "unified",
+        post_diag_mode: Optional[str] = None,
+        profile: Optional[str] = None,
+        precision: Optional[str] = None,
+        grad_accum_steps: Optional[int] = None,
+        num_workers: Optional[int] = None,
+        full_ckpt_base: Optional[str] = None,
         checkpoints_base: str = "outputs/checkpoints",
         reports_base: str = "outputs/reports",
         device_str: str = "auto",
-        batch_size: int = 128,
-        test_batch_size: int = 256,
+        batch_size: Optional[int] = None,
+        test_batch_size: Optional[int] = None,
         test_stride: int = 100,
         logger: Optional[Any] = None,
     ):
         self.config_model_path = config_model_path
-        self.config_train_path = config_train_path
+        if config_dataset_path is None:
+            config_dataset_path = "configs/dataset/eedi_task34.yaml" if dataset_arg == "eedi" else "configs/dataset/xes3g5m.yaml"
         self.config_dataset_path = config_dataset_path
-        self.full_ckpt_base = full_ckpt_base
-        self.checkpoints_base = checkpoints_base
-        self.reports_base = reports_base
-        self.batch_size = batch_size
-        self.test_batch_size = test_batch_size
-        self.test_stride = test_stride
+        self.dataset_cfg_base = load_yaml_config(self.config_dataset_path)
+        self.dataset_key = resolve_dataset_key(dataset_cfg=self.dataset_cfg_base, dataset_arg=dataset_arg)
+
+        if config_train_path is None:
+            eedi_train_cfg = "configs/train_acd_mmkt_v3_eedi.yaml"
+            config_train_path = eedi_train_cfg if (self.dataset_key == "eedi" and os.path.exists(eedi_train_cfg)) else "configs/train_acd_mmkt_v3.yaml"
+        self.config_train_path = config_train_path
 
         self.model_cfg_base = load_yaml_config(self.config_model_path)
         self.train_cfg_base = load_yaml_config(self.config_train_path)
-        self.dataset_cfg_base = load_yaml_config(self.config_dataset_path)
-        self.data_dir = self.dataset_cfg_base.get("data_dir", "data/processed/XES3G5M")
+
+        if profile and "profiles" in self.train_cfg_base and profile in self.train_cfg_base["profiles"]:
+            prof = self.train_cfg_base["profiles"][profile]
+            for k, v in prof.items():
+                self.train_cfg_base[k] = v
+            if device_str == "auto" and "device" in prof:
+                device_str = prof["device"]
+
+        if post_diag_mode is not None:
+            self.model_cfg_base["post_diag_mode"] = post_diag_mode
+        elif "post_diag_mode" in self.train_cfg_base and self.train_cfg_base["post_diag_mode"] is not None:
+            self.model_cfg_base["post_diag_mode"] = self.train_cfg_base["post_diag_mode"]
+
+        paths = resolve_dataset_paths(
+            dataset_key=self.dataset_key,
+            dataset_cfg=self.dataset_cfg_base,
+            train_cfg=self.train_cfg_base,
+            checkpoint_dir=checkpoints_base,
+            output_report_dir=reports_base,
+        )
+        self.display_name = paths["display_name"]
+        self.data_dir = paths["data_dir"]
+        self.checkpoints_base = paths["checkpoint_dir"]
+        self.reports_base = paths["output_report_dir"]
+        self.log_dir = paths["log_dir"]
+        self.full_ckpt_base = full_ckpt_base or os.path.join(self.checkpoints_base, "acd_mmkt_v3_full_5fold")
+
+        self.model_cfg_base["dataset_name"] = self.display_name
+        self.model_cfg_base["num_questions"] = self.dataset_cfg_base.get("num_questions", self.model_cfg_base.get("num_questions", 7652))
+        self.model_cfg_base["num_kcs"] = self.dataset_cfg_base.get("num_kcs", self.model_cfg_base.get("num_kcs", 1175))
+
+        self.test_split = test_split or self.train_cfg_base.get("test_split", "unified")
+        self.split_tag = resolve_split_tag(self.dataset_key, self.test_split)
+        self.batch_size = batch_size or self.train_cfg_base.get("batch_size", 128)
+        self.test_batch_size = test_batch_size or self.train_cfg_base.get("test_batch_size", 256)
+        self.test_stride = test_stride
+        self.precision = precision or self.train_cfg_base.get("precision", "fp32")
+        self.grad_accum_steps = grad_accum_steps or self.train_cfg_base.get("grad_accum_steps", 1)
+        self.num_workers = num_workers if num_workers is not None else self.train_cfg_base.get("num_workers", 0)
 
         if device_str == "auto":
             self.device = torch.device(
@@ -159,8 +212,12 @@ class ModalityAblationPipeline:
         self.logger = logger or get_logger("ablation_study_pipeline")
         os.makedirs(self.checkpoints_base, exist_ok=True)
         os.makedirs(self.reports_base, exist_ok=True)
+        os.makedirs(self.log_dir, exist_ok=True)
 
-        self.logger.info(f"Initialized ModalityAblationPipeline on device: {self.device}")
+        self.logger.info(
+            f"Initialized ModalityAblationPipeline on {self.display_name} "
+            f"(split={self.test_split}, post_diag_mode={self.model_cfg_base.get('post_diag_mode', 'none')}, device={self.device})"
+        )
 
         # Load shared auxiliary metadata (concept priors, question stats per fold)
         aux_path = os.path.join(self.data_dir, "acd_v3_aux_metadata.pt")
@@ -169,12 +226,19 @@ class ModalityAblationPipeline:
         else:
             raise FileNotFoundError(f"Required auxiliary metadata not found at {aux_path}")
 
+        self.num_questions = int(self.aux_data["N_q_folds"].size(1))
+
         # Shared Test Context for unified evaluation and pedagogical stratification
-        self.logger.info("Initializing shared TestContext from raw release...")
-        self.ctx = TestContext(raw_root_dir="data/raw/XES3G5M", processed_dir=self.data_dir)
+        if self.dataset_key == "eedi":
+            self.logger.info(f"Initializing EediTestContext from {self.data_dir} (split={self.test_split})...")
+            self.ctx = EediTestContext(processed_dir=self.data_dir, test_split=self.test_split, test_stride=self.test_stride)
+        else:
+            self.logger.info("Initializing shared TestContext from raw XES3G5M release...")
+            self.ctx = TestContext(raw_root_dir="data/raw/XES3G5M", processed_dir=self.data_dir)
         self.targets = self.ctx.targets
+        self.num_test_interactions = int(len(self.targets))
         self.strata_masks = self.ctx.strata_masks()
-        self.logger.info(f"TestContext loaded {len(self.targets):,} test interactions.")
+        self.logger.info(f"TestContext loaded {self.num_test_interactions:,} test interactions.")
 
         # Full model representations and visual cognitive load partition
         self.full_delta_mu_vis: Optional[np.ndarray] = None
@@ -182,23 +246,76 @@ class ModalityAblationPipeline:
         self.full_fold_preds: List[np.ndarray] = []
         self.full_fold_aucs: List[float] = []
         self.full_fold_props: List[Dict[str, np.ndarray]] = []
+        self.full_total_params: int = 892936 if self.dataset_key == "xes3g5m" else 0
 
-    def load_or_compute_full_model_data(self) -> None:
+    def load_or_compute_full_model_data(
+        self,
+        folds: Optional[List[int]] = None,
+        train_if_missing: bool = False,
+        num_epochs: int = 50,
+        lr: float = 1e-3,
+        seed: int = 42,
+        patience: int = 10,
+    ) -> None:
         """
-        Load Full ACD-MMKTv3 predictions across 5 folds and extract full-model
-        item bank delta_mu_vis and tilde_mu averaged across all 5 folds.
+        Load Full ACD-MMKTv3 predictions across folds (optionally training from scratch if missing
+        and train_if_missing=True) and extract full-model item bank delta_mu_vis and tilde_mu.
         Derives signed visual cognitive load slices:
         - vis_scaffold_aid: Delta mu_vis < 0
         - vis_cognitive_overload: Delta mu_vis > 0
         """
+        target_folds = folds or [0, 1, 2, 3, 4]
         self.logger.info("Loading Full ACD-MMKTv3 fold predictions and cache...")
         self.full_fold_preds = []
         self.full_fold_aucs = []
+        split_tag = self.split_tag
 
-        for f in range(5):
-            pred_file = os.path.join(self.full_ckpt_base, f"acd_mmkt_v3_fold{f}", "test_predictions.npy")
+        # Train missing Full checkpoints (--include-full) or auto-evaluate existing checkpoints on a new Eedi split
+        all_ckpts_exist = all(
+            os.path.exists(os.path.join(self.full_ckpt_base, f"acd_mmkt_v3_fold{f}", "best_model.pt"))
+            for f in target_folds
+        )
+        missing_preds = any(
+            not os.path.exists(os.path.join(self.full_ckpt_base, f"acd_mmkt_v3_fold{f}", f"test_predictions{split_tag}.npy"))
+            for f in target_folds
+        )
+        if not all_ckpts_exist and train_if_missing:
+            self.logger.info("Full ACD-MMKTv3 checkpoints missing; training Full Model 5-fold first (--include-full)...")
+            full_res = self.execute_ablation(
+                ablation_arg="full",
+                folds=target_folds,
+                eval_only=False,
+                num_epochs=num_epochs,
+                batch_size=self.batch_size,
+                lr=lr,
+                seed=seed,
+                patience=patience,
+            )
+            self.full_total_params = full_res["total_params"]
+        elif missing_preds and all_ckpts_exist:
+            self.logger.info(
+                f"Full ACD-MMKTv3 checkpoints exist but predictions for split '{self.test_split}' are missing; "
+                "evaluating existing checkpoints without retraining..."
+            )
+            full_res = self.execute_ablation(
+                ablation_arg="full",
+                folds=target_folds,
+                eval_only=True,
+                num_epochs=num_epochs,
+                batch_size=self.batch_size,
+                lr=lr,
+                seed=seed,
+                patience=patience,
+            )
+            self.full_total_params = full_res["total_params"]
+
+        for f in target_folds:
+            pred_file = os.path.join(self.full_ckpt_base, f"acd_mmkt_v3_fold{f}", f"test_predictions{split_tag}.npy")
             if not os.path.exists(pred_file):
-                raise FileNotFoundError(f"Required Full ACD-MMKTv3 prediction file missing: {pred_file}")
+                raise FileNotFoundError(
+                    f"Required Full ACD-MMKTv3 prediction file missing: {pred_file}. "
+                    f"Run `run_5fold_acd_mmkt_v3.py --dataset {self.dataset_key}` first or pass `--include-full`."
+                )
             p = np.load(pred_file).astype(np.float64)
             self.full_fold_preds.append(p)
             self.full_fold_aucs.append(float(compute_binary_metrics(p, self.targets)["auc"]))
@@ -217,27 +334,41 @@ class ModalityAblationPipeline:
             cached_data = torch.load(cached_full_props_path, map_location="cpu", weights_only=False)
             self.full_fold_props = cached_data["fold_props"]
             self.full_delta_mu_vis = cached_data["mean_delta_mu_vis"]
+            if "total_trainable_params" in cached_data:
+                self.full_total_params = int(cached_data["total_trainable_params"])
         else:
-            self.logger.info("Extracting Full Model delta_mu_vis and tilde_mu across all 5 folds...")
-            item_bank = load_static_item_bank_optimized(self.data_dir, model_type="acd_mmkt_v3")
+            self.logger.info("Extracting Full Model delta_mu_vis and tilde_mu across all folds...")
+            item_bank = load_static_item_bank_for_dataset(self.dataset_key, self.data_dir, model_type="acd_mmkt_v3")
+            full_cfg = dict(self.model_cfg_base)
+            ckpt0_path = os.path.join(self.full_ckpt_base, f"acd_mmkt_v3_fold{target_folds[0]}", "best_model.pt")
+            if os.path.exists(ckpt0_path):
+                ckpt0 = torch.load(ckpt0_path, map_location="cpu", weights_only=False)
+                if ckpt0.get("model_cfg"):
+                    full_cfg.update(ckpt0["model_cfg"])
+
             full_model = ACDMMKTv3(
                 static_item_bank=item_bank,
-                d_raw_txt=self.model_cfg_base.get("d_raw_txt", 768),
-                d_raw_img=self.model_cfg_base.get("d_raw_img", 768),
-                d_model=self.model_cfg_base.get("d_model", 128),
-                num_heads=self.model_cfg_base.get("num_heads", 4),
-                max_seq_len=self.model_cfg_base.get("max_seq_len", 200),
+                d_raw_txt=full_cfg.get("d_raw_txt", 768),
+                d_raw_img=full_cfg.get("d_raw_img", 768),
+                d_model=full_cfg.get("d_model", 128),
+                num_heads=full_cfg.get("num_heads", 4),
+                max_seq_len=full_cfg.get("max_seq_len", 200),
                 dropout=0.0,
                 p_drop=0.0,
+                hgnn_layers=full_cfg.get("hgnn_layers", 2),
+                gamma_vis=full_cfg.get("gamma_vis", 1.5),
+                delta_a=full_cfg.get("delta_a", 0.1),
                 use_solution=True,
                 use_visual=True,
                 use_multimodal=True,
+                post_diag_mode=full_cfg.get("post_diag_mode", "none"),
             )
+            self.full_total_params = sum(p.numel() for p in full_model.parameters() if p.requires_grad)
 
             all_delta_mu_vis = []
             self.full_fold_props = []
 
-            for f in range(5):
+            for f in target_folds:
                 ckpt_path = os.path.join(self.full_ckpt_base, f"acd_mmkt_v3_fold{f}", "best_model.pt")
                 if os.path.exists(ckpt_path):
                     ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
@@ -248,6 +379,7 @@ class ModalityAblationPipeline:
                     props = {
                         "tilde_mu": full_model.cached_item_properties["tilde_mu"].detach().cpu().numpy(),
                         "mu_q": full_model.cached_item_properties["mu_q"].detach().cpu().numpy(),
+                        "a_q": full_model.cached_item_properties["a_q"].detach().cpu().numpy(),
                         "delta_mu_vis": full_model.cached_item_properties["delta_mu_vis"].detach().cpu().numpy(),
                         "delta_mu_stem": full_model.cached_item_properties["delta_mu_stem"].detach().cpu().numpy(),
                         "delta_mu_sol": full_model.cached_item_properties["delta_mu_sol"].detach().cpu().numpy(),
@@ -265,9 +397,16 @@ class ModalityAblationPipeline:
                     {
                         "fold_props": self.full_fold_props,
                         "mean_delta_mu_vis": self.full_delta_mu_vis,
+                        "total_trainable_params": self.full_total_params,
                     },
                     cached_full_props_path,
                 )
+
+        if self.full_total_params == 0:
+            ckpt0_path = os.path.join(self.full_ckpt_base, f"acd_mmkt_v3_fold{target_folds[0]}", "best_model.pt")
+            if os.path.exists(ckpt0_path):
+                ckpt0 = torch.load(ckpt0_path, map_location="cpu", weights_only=False)
+                self.full_total_params = int(sum(t.numel() for t in ckpt0["model_state_dict"].values()))
 
         if self.full_delta_mu_vis is not None:
             q_ids = self.ctx.q_ids
@@ -374,13 +513,14 @@ class ModalityAblationPipeline:
         fold_save_dir = os.path.join(self.checkpoints_base, folder_name, f"acd_mmkt_v3_fold{fold}")
         os.makedirs(fold_save_dir, exist_ok=True)
         ckpt_path = os.path.join(fold_save_dir, "best_model.pt")
-        pred_path = os.path.join(fold_save_dir, "test_predictions.npy")
-        target_path = os.path.join(fold_save_dir, "test_targets.npy")
+        split_tag = self.split_tag
+        pred_path = os.path.join(fold_save_dir, f"test_predictions{split_tag}.npy")
+        target_path = os.path.join(fold_save_dir, f"test_targets{split_tag}.npy")
         item_props_path = os.path.join(fold_save_dir, "cached_item_properties.pt")
 
         # Fast path: If eval_only and predictions and item properties already exist, load directly
         if eval_only and os.path.exists(pred_path) and os.path.exists(item_props_path):
-            self.logger.info(f"[{display_title}] Fold {fold}: Found cached test_predictions.npy and item properties. Loading...")
+            self.logger.info(f"[{display_title}] Fold {fold}: Found cached {os.path.basename(pred_path)} and item properties. Loading...")
             preds_arr = np.load(pred_path).astype(np.float64)
             item_props = torch.load(item_props_path, map_location="cpu", weights_only=False)
             m = compute_binary_metrics(preds_arr, self.targets)
@@ -398,8 +538,9 @@ class ModalityAblationPipeline:
 
         # DataLoader setup
         p_drop = train_cfg.get("p_drop", 0.0)
-        self.logger.info(f"[{display_title}] Fold {fold}: Initializing DataLoaders (p_drop={p_drop})...")
-        train_loader, val_loader, test_loader, item_bank = get_xes3g5m_dataloaders(
+        self.logger.info(f"[{display_title}] Fold {fold}: Initializing DataLoaders (p_drop={p_drop}, split={self.test_split})...")
+        train_loader, val_loader, test_loader, item_bank = get_dataloaders_for_dataset(
+            dataset_key=self.dataset_key,
             data_dir=self.data_dir,
             val_fold=fold,
             model_type="acd_mmkt_v3",
@@ -407,7 +548,8 @@ class ModalityAblationPipeline:
             test_batch_size=self.test_batch_size,
             p_drop=p_drop,
             test_stride=self.test_stride,
-            num_workers=0,
+            num_workers=self.num_workers,
+            test_split=self.test_split,
         )
         mu_prior = self.aux_data["mu_concept_folds"][fold].to(self.device)
 
@@ -476,8 +618,8 @@ class ModalityAblationPipeline:
                     save_dir=fold_save_dir,
                     val_fold=fold,
                     model_cfg=model_cfg,
-                    precision=train_cfg.get("precision", "fp32"),
-                    grad_accum_steps=train_cfg.get("grad_accum_steps", 1),
+                    precision=self.precision,
+                    grad_accum_steps=self.grad_accum_steps,
                     logger=self.logger,
                 )
                 trainer.train(num_epochs=num_epochs)
@@ -575,8 +717,8 @@ class ModalityAblationPipeline:
         ens_metrics["student_macro_auc"] = ens_macro["macro_auc"]
         ens_metrics["student_macro_auc_std"] = ens_macro["std_auc"]
 
-        # Cache ensemble predictions
-        ens_pred_path = os.path.join(self.checkpoints_base, folder_name, "ensemble_predictions.npy")
+        # Cache ensemble predictions (isolated per Eedi test_split when non-unified)
+        ens_pred_path = os.path.join(self.checkpoints_base, folder_name, f"ensemble_predictions{self.split_tag}.npy")
         np.save(ens_pred_path, ensemble_preds)
 
         # Mean and standard deviation across folds for all metrics
@@ -635,8 +777,8 @@ class ModalityAblationPipeline:
         """
         q_ids = self.ctx.q_ids
         targets = self.targets
-        q_totals = np.bincount(q_ids, minlength=7652)
-        q_corrects = np.bincount(q_ids, weights=targets, minlength=7652)
+        q_totals = np.bincount(q_ids, minlength=self.num_questions)
+        q_corrects = np.bincount(q_ids, weights=targets, minlength=self.num_questions)
 
         valid_qs = np.where(q_totals >= 10)[0]
         empirical_error_rate = 1.0 - (q_corrects[valid_qs] / q_totals[valid_qs].astype(np.float64))
@@ -648,7 +790,7 @@ class ModalityAblationPipeline:
         r_val, p_r = safe_pearsonr(est_diff, empirical_error_rate)
         rho_val, p_rho = safe_spearmanr(est_diff, empirical_error_rate)
 
-        return {
+        res: Dict[str, Any] = {
             "pearson_r": float(r_val),
             "pearson_pvalue": float(p_r),
             "spearman_rho": float(rho_val),
@@ -656,23 +798,44 @@ class ModalityAblationPipeline:
             "num_evaluated_items": int(len(valid_qs)),
         }
 
+        # Optional Task 3 Expert Pairwise Agreement on Eedi
+        if (
+            self.dataset_key == "eedi"
+            and "task3_expert_pairs" in self.aux_data
+            and len(all_fold_props) > 0
+            and "a_q" in all_fold_props[0]
+        ):
+            mean_a_q = np.mean([props["a_q"] for props in all_fold_props], axis=0)
+            res["task3_expert_validation"] = evaluate_task3_expert_pairs(
+                a_q=mean_a_q,
+                tilde_mu=mean_tilde_mu,
+                task3_expert_pairs=self.aux_data["task3_expert_pairs"],
+            )
+
+        return res
+
 
 def format_markdown_single_report(
     exp_data: Dict[str, Any],
     full_model_data: Dict[str, Any],
     stratified_metrics: Dict[str, Dict[str, float]],
     stat_tests: Dict[str, Any],
-    psychometrics: Dict[str, float],
+    psychometrics: Dict[str, Any],
     output_path: str,
+    dataset_display: str = "XES3G5M",
+    num_test_interactions: int = 1099197,
+    num_students: int = 3613,
+    checkpoints_base: str = "outputs/checkpoints",
 ) -> None:
     """Format and write individual 5-fold evaluation report in GitHub Markdown."""
+    storage_path = os.path.join(checkpoints_base, exp_data["folder_name"])
     lines = [
         f"# ACD-MMKTv3 5-Fold Cross-Validation Report: {exp_data['display_name']}",
         f"",
         f"- **Model Configuration**: `{exp_data['report_suffix']}`",
-        f"- **Storage Partition**: `outputs/checkpoints/{exp_data['folder_name']}/`",
+        f"- **Storage Partition**: `{storage_path}/`",
         f"- **Trainable Parameters**: `{exp_data['total_params']:,}`",
-        f"- **Target Dataset**: XES3G5M (1,099,197 test interactions, 3,613 students)",
+        f"- **Target Dataset**: {dataset_display} ({num_test_interactions:,} test interactions, {num_students:,} students)",
         f"",
         f"## 1. 5-Fold Single Fold Results & Mean Summary",
         f"",
@@ -714,18 +877,28 @@ def format_markdown_single_report(
         ("prev_solution_image", "Prior Solution Image (m_img,t-1^s = 1)"),
         ("after_incorrect", "Remedial Learning (r_t-1 = 0)"),
         ("after_correct", "Reinforcement Learning (r_t-1 = 1)"),
+        ("after_dom_misconception", "After Dominant Misconception"),
+        ("after_overconfident_error", "After Overconfident Error"),
         ("freq_rare_le10", "Cold-Start / Rare Items (N_q <= 10)"),
         ("freq_medium_11_100", "Medium Frequency Items (11 <= N_q <= 100)"),
         ("freq_frequent_gt100", "Frequent Items (N_q > 100)"),
         ("single_kc", "Single-KC Items"),
         ("multi_kc", "Multi-KC Items"),
+        ("layout_horizontal", "Slide Layout: Horizontal"),
+        ("layout_grid", "Slide Layout: Grid 2x2"),
+        ("layout_vertical", "Slide Layout: Vertical"),
+        ("domain_number", "Domain: Number"),
+        ("domain_algebra", "Domain: Algebra"),
+        ("domain_geometry", "Domain: Geometry & Measure"),
+        ("task4_any_target_split", "Task 4 Target Split Subset"),
     ]
 
+    denom = max(1, num_test_interactions)
     for s_key, s_label in strata_labels:
-        if s_key in stratified_metrics:
+        if s_key in stratified_metrics and stratified_metrics[s_key].get("num_samples", 0) > 0:
             sm = stratified_metrics[s_key]
             lines.append(
-                f"| {s_label} | {sm['num_samples']:,} | {sm['num_samples']/1099197*100:.1f}% | {sm['auc']:.4f} | {sm['acc']:.4f} | {sm['ece']:.4f} |"
+                f"| {s_label} | {sm['num_samples']:,} | {sm['num_samples']/denom*100:.1f}% | {sm['auc']:.4f} | {sm['acc']:.4f} | {sm['ece']:.4f} |"
             )
 
     lines.extend([
@@ -736,6 +909,18 @@ def format_markdown_single_report(
         f"- **Spearman correlation rho(tilde_mu, empirical_error)**: `{psychometrics['spearman_rho']:.4f}` (p = `{psychometrics['spearman_pvalue']:.2e}`)",
         f"- **Number of Evaluated Items (N_q >= 10)**: `{psychometrics['num_evaluated_items']:,}`",
         f"- **2PL-IRT Decision Faithfulness**: `{exp_data['mean_metrics']['faithfulness']:.1f}%` verified across all folds.",
+    ])
+
+    if "task3_expert_validation" in psychometrics:
+        t3 = psychometrics["task3_expert_validation"]
+        lines.append(
+            f"- **Task 3 Expert Pairwise Agreement (N={t3['num_pairs']})**: "
+            f"`{t3['a_q_agreement']:.4f}` ({t3['a_q_correct']}/{t3['num_pairs']}) | "
+            f"Public: `{t3['a_q_public_agreement']:.4f}` | Private: `{t3['a_q_private_agreement']:.4f}` | "
+            f"Strong Consensus (>=4/5): `{t3['a_q_strong_consensus_agreement']:.4f}`"
+        )
+
+    lines.extend([
         f"",
         f"## 5. Statistical Significance vs Full Model & Baselines",
         f"",
@@ -775,18 +960,22 @@ def generate_master_ablation_markdown_report(
     Guarantees 100% dynamically interpolated values from experimental results.
     Safely handles partial subsets of ablations without crashing.
     """
+    meta = master_data["metadata"]
+    ds_name = meta.get("dataset", "XES3G5M")
+    n_test = meta.get("num_test_interactions", 1099197)
+    n_students = meta.get("num_students", 3613)
     full_ens = master_data["full_model"]["ensemble_metrics"]
     full_mean = master_data["full_model"]["mean_metrics"]
     full_strat = all_stratified.get("full", {})
 
     lines = [
         f"# Báo Cáo Nghiên Cứu Cắt Bỏ Đa Phương Thức Toàn Diện (Comprehensive Modality Ablation Study)",
-        f"## Mô Hình ACD-MMKTv3 Trên Tập Dữ Liệu Chuẩn XES3G5M (Chuẩn pyKT Protocol)",
+        f"## Mô Hình ACD-MMKTv3 Trên Tập Dữ Liệu {ds_name} (Chuẩn pyKT Protocol)",
         f"",
         f"- **Mô hình nghiên cứu**: ACD-MMKTv3 (*Asymmetric Causal-Disentangled Multimodal Knowledge Tracing v3*)",
-        f"- **Bộ dữ liệu kiểm thử**: XES3G5M (1,099,197 tương tác độc lập của 3,613 học sinh)",
+        f"- **Bộ dữ liệu kiểm thử**: {ds_name} ({n_test:,} tương tác độc lập của {n_students:,} học sinh)",
         f"- **Giao thức thực nghiệm**: 5-Fold Cross-Validation, Soft-Probability Ensemble và Phân tầng Sư phạm 4 Chiều",
-        f"- **Thời điểm cập nhật**: {master_data['metadata']['timestamp']}",
+        f"- **Thời điểm cập nhật**: {meta['timestamp']}",
         f"",
         f"---",
         f"",
@@ -794,7 +983,7 @@ def generate_master_ablation_markdown_report(
         f"",
         f"| Mô hình / Biến thể | Phương thức hoạt động | Số tham số | 5-Fold Mean AUC | 5-Fold Ens. AUC | Ens. ACC | RMSE | Brier Score | ECE | Macro-AUC |",
         f"| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |",
-        f"| **ACD-MMKTv3 (Full Model)** | $C_\\tau, T_q, I_q, T_s, I_s$ | **{param_counts.get('Full ACD-MMKTv3', 892936):,}** | **{full_mean['auc']:.4f} ± {full_mean['auc_std']:.4f}** | **{full_ens['auc']:.4f}** | **{full_ens['acc']:.4f}** | **{full_ens['rmse']:.4f}** | **{full_ens['brier']:.4f}** | **{full_ens['ece']:.4f}** | **{full_ens.get('student_macro_auc', 0.0):.4f}** |",
+        f"| **ACD-MMKTv3 (Full Model)** | $C_\\tau, T_q, I_q, T_s, I_s$ | **{param_counts.get('Full ACD-MMKTv3', 0):,}** | **{full_mean['auc']:.4f} ± {full_mean['auc_std']:.4f}** | **{full_ens['auc']:.4f}** | **{full_ens['acc']:.4f}** | **{full_ens['rmse']:.4f}** | **{full_ens['brier']:.4f}** | **{full_ens['ece']:.4f}** | **{full_ens.get('student_macro_auc', 0.0):.4f}** |",
     ]
 
     # Ablation rows (safely checked)
@@ -862,10 +1051,13 @@ def generate_master_ablation_markdown_report(
 
     sol_img_full = full_strat.get("prev_solution_image", {})
     sol_img_ab2 = all_stratified.get("2", {}).get("prev_solution_image", {})
+    if sol_img_full.get("num_samples", 0) > 0:
+        lines.extend([
+            f"- **Nhóm tương tác sau lời giải có ảnh ($m_{{\\text{{img}}, t-1}}^s = 1$, {sol_img_full.get('num_samples', 0):,} tương tác)**:",
+            f"  - Full ACD-MMKTv3: $\\text{{AUC}} = {sol_img_full.get('auc', 0.0):.4f}$"
+            + (f" | Ablation 2 (`w/o Solution`): $\\text{{AUC}} = {sol_img_ab2.get('auc', 0.0):.4f} (\\Delta\\text{{AUC}} = {sol_img_ab2.get('auc', 0.0) - sol_img_full.get('auc', 0.0):+.4f}$)" if "2" in all_stratified else ""),
+        ])
     lines.extend([
-        f"- **Nhóm tương tác sau lời giải có ảnh ($m_{{\\text{{img}}, t-1}}^s = 1$, {sol_img_full.get('num_samples', 151148):,} tương tác)**:",
-        f"  - Full ACD-MMKTv3: $\\text{{AUC}} = {sol_img_full.get('auc', 0.0):.4f}$"
-        + (f" | Ablation 2 (`w/o Solution`): $\\text{{AUC}} = {sol_img_ab2.get('auc', 0.0):.4f} (\\Delta\\text{{AUC}} = {sol_img_ab2.get('auc', 0.0) - sol_img_full.get('auc', 0.0):+.4f}$)" if "2" in all_stratified else ""),
         f"",
         f"### Lát cắt 2: Tần suất Câu hỏi & Khởi đầu Lạnh (Cold-Start Items)",
     ])
@@ -931,7 +1123,7 @@ def generate_master_ablation_markdown_report(
     avg_faith = float(np.mean(faith_rates)) if len(faith_rates) > 0 else 100.0
 
     lines.extend([
-        f"- **2PL-IRT Decision Faithfulness**: Đạt **{avg_faith:.1f}%** tuyệt đối trên toàn bộ 1,099,197 tương tác độc lập ở các biến thể cắt bỏ.",
+        f"- **2PL-IRT Decision Faithfulness**: Đạt **{avg_faith:.1f}%** tuyệt đối trên toàn bộ {n_test:,} tương tác độc lập ở các biến thể cắt bỏ.",
         f"",
         f"---",
         f"",
@@ -991,11 +1183,11 @@ def generate_master_ablation_markdown_report(
         f"",
         f"| STT | Cổng kiểm định chất lượng | Tiêu chuẩn nghiệm thu khoa học | Kết quả thực tế | Trạng thái |",
         f"| :-: | :--- | :--- | :--- | :---: |",
-        f"| **1** | **Cắt bỏ thuần túy (Pure Pruning)** | Không cấy thêm tham số ngoại lai; số tham số giảm nghiêm ngặt | Full: {param_counts.get('Full ACD-MMKTv3', 892936):,} $\\to$ Exp 2: {param_counts.get('Ablation 2 (w/o Solution)', 728328):,} $\\to$ Exp 3: {param_counts.get('Ablation 3 (w/o Visual)', 529032):,} $\\to$ Exp 1: {param_counts.get('Ablation 1 (Pure KC)', 350088):,}; 100% gradient khả vi | **PASSED** |",
+        f"| **1** | **Cắt bỏ thuần túy (Pure Pruning)** | Không cấy thêm tham số ngoại lai; số tham số giảm nghiêm ngặt | Full: {param_counts.get('Full ACD-MMKTv3', 0):,} $\\to$ Exp 2: {param_counts.get('Ablation 2 (w/o Solution)', 0):,} $\\to$ Exp 3: {param_counts.get('Ablation 3 (w/o Visual)', 0):,} $\\to$ Exp 1: {param_counts.get('Ablation 1 (Pure KC)', 0):,}; 100% gradient khả vi | **PASSED** |",
         f"| **2** | **Zero Modality Leakage** | Bất biến tuyệt đối trước nhiễu cực đoan $\\pm 10^4$ (sai số $\\le 10^{{-7}}$) | Vượt qua 100% các bài test nhiễu; ngắt sạch dòng ảnh và lời giải | **PASSED** |",
         f"| **3** | **Bảo toàn định đề toán học** | Gram-Schmidt $|\\langle d^q, c_C \\rangle| < 10^{{-5}}$, cache khớp $\\le 10^{{-6}}$, 100% Faithfulness | Duy trì trực giao, tính nguyên tử, cache khớp 100% và {avg_faith:.1f}% 2PL-IRT Faithfulness | **PASSED** |",
         f"| **4** | **An toàn dữ liệu và cô lập** | Không ghi đè trọng số bản đầy đủ (`acd_mmkt_v3_full_5fold`) | Tách biệt hoàn toàn thành 3 thư mục độc lập kèm cấu hình nội tại | **PASSED** |",
-        f"| **5** | **Đồng bộ 5-Fold CV chuẩn pyKT** | 15 mô hình thành phần độc lập trên 1,099,197 tương tác | Hoàn tất cấu trúc huấn luyện chuẩn với AdamW, Cosine Annealing, patience=10 | **PASSED** |",
+        f"| **5** | **Đồng bộ 5-Fold CV chuẩn pyKT** | 15 mô hình thành phần độc lập trên {n_test:,} tương tác | Hoàn tất cấu trúc huấn luyện chuẩn với AdamW, Cosine Annealing, patience=10 | **PASSED** |",
         f"| **6** | **Đánh giá phân tầng đa chiều** | Xuất đầy đủ 4 lát cắt (Thị giác, Tần suất/Cold-start, Remedial, Tâm trắc học) | Khảo sát chi tiết trên toàn bộ các lát cắt, chứng minh hiện tượng pha loãng độ đo | **PASSED** |",
         f"| **7** | **Kiểm định thống kê bắt cặp** | Bộ ba kiểm định Paired t-test/Wilcoxon, DeLong Holm-Bonferroni, 1.000-rep Bootstrap | Kiểm định bắt cặp toàn diện 3 tầng đạt chuẩn ý nghĩa khoa học | **PASSED** |",
     ])
@@ -1006,15 +1198,23 @@ def generate_master_ablation_markdown_report(
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Master Modality Ablation Study Runner for ACD-MMKTv3.")
+    parser.add_argument("--dataset", type=str, choices=["xes3g5m", "eedi"], default=None, help="Target dataset shortcut ('xes3g5m' or 'eedi')")
     parser.add_argument("--config-model", type=str, default="configs/model/acd_mmkt_v3.yaml", help="Path to model config")
-    parser.add_argument("--config-train", type=str, default="configs/train_acd_mmkt_v3.yaml", help="Path to training config")
-    parser.add_argument("--config-dataset", type=str, default="configs/dataset/xes3g5m.yaml", help="Path to dataset config")
+    parser.add_argument("--config-train", type=str, default=None, help="Path to training config")
+    parser.add_argument("--config-dataset", type=str, default=None, help="Path to dataset config")
+    parser.add_argument("--test-split", type=str, choices=["unified", "public", "private"], default="unified", help="Eedi test split ('unified', 'public', or 'private')")
+    parser.add_argument("--post-diag-mode", type=str, choices=["none", "behavioral", "diagnostic"], default=None, help="Override post-response diagnostic vector mode")
+    parser.add_argument("--profile", type=str, choices=["m1_pro", "dual_gpu_5060ti", "dual_gpu_3060", "kaggle_t4", "kaggle_tpu_v5e", "colab_t4", "colab_l4", "colab_a100", "colab_tpu_v5e"], default=None, help="Hardware execution profile")
+    parser.add_argument("--precision", type=str, choices=["fp32", "amp_fp16", "amp_bf16"], default=None, help="Computation precision")
+    parser.add_argument("--grad-accum-steps", type=int, default=None, help="Gradient accumulation steps")
+    parser.add_argument("--num-workers", type=int, default=None, help="Number of DataLoader workers")
+    parser.add_argument("--include-full", action="store_true", help="Train Full ACD-MMKTv3 5-fold first if checkpoints are missing")
     parser.add_argument("--ablations", type=str, nargs="+", default=["3", "2", "1"], help="Ablation presets to run ('1', '2', '3')")
     parser.add_argument("--folds", type=int, nargs="+", default=[0, 1, 2, 3, 4], help="Folds to execute (0..4)")
     parser.add_argument("--eval-only", action="store_true", help="Only evaluate existing fold checkpoints without retraining")
     parser.add_argument("--num-epochs", type=int, default=50, help="Number of training epochs per fold")
-    parser.add_argument("--batch-size", type=int, default=128, help="Batch size for training")
-    parser.add_argument("--test-batch-size", type=int, default=256, help="Batch size for evaluation")
+    parser.add_argument("--batch-size", type=int, default=None, help="Batch size for training")
+    parser.add_argument("--test-batch-size", type=int, default=None, help="Batch size for evaluation")
     parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate")
     parser.add_argument("--patience", type=int, default=10, help="Early stopping patience")
     parser.add_argument("--device", type=str, default="auto", help="Compute device ('cuda', 'mps', 'cpu', 'auto')")
@@ -1026,15 +1226,18 @@ def parse_args():
 def main():
     args = parse_args()
     logger = get_logger("run_modality_ablation_study")
-    logger.info("================================================================================")
-    logger.info("   STARTING ACD-MMKTv3 MODALITY ABLATION STUDY SUITE ON XES3G5M (pyKT)   ")
-    logger.info("================================================================================")
-    logger.info(f"Target Ablations: {args.ablations} | Target Folds: {args.folds} | Eval-Only: {args.eval_only}")
 
     pipeline = ModalityAblationPipeline(
         config_model_path=args.config_model,
         config_train_path=args.config_train,
         config_dataset_path=args.config_dataset,
+        dataset_arg=args.dataset,
+        test_split=args.test_split,
+        post_diag_mode=args.post_diag_mode,
+        profile=args.profile,
+        precision=args.precision,
+        grad_accum_steps=args.grad_accum_steps,
+        num_workers=args.num_workers,
         checkpoints_base=args.checkpoint_dir,
         reports_base=args.output_report_dir,
         device_str=args.device,
@@ -1043,8 +1246,19 @@ def main():
         logger=logger,
     )
 
-    # 1. Load Full ACD-MMKTv3 Predictions and Cache from Disk
-    pipeline.load_or_compute_full_model_data()
+    logger.info("================================================================================")
+    logger.info(f"   STARTING ACD-MMKTv3 MODALITY ABLATION STUDY SUITE ON {pipeline.display_name.upper()}   ")
+    logger.info("================================================================================")
+    logger.info(f"Target Ablations: {args.ablations} | Target Folds: {args.folds} | Eval-Only: {args.eval_only}")
+
+    # 1. Load (or train if --include-full) Full ACD-MMKTv3 Predictions and Cache from Disk
+    pipeline.load_or_compute_full_model_data(
+        folds=args.folds,
+        train_if_missing=args.include_full and not args.eval_only,
+        num_epochs=args.num_epochs,
+        lr=args.lr,
+        patience=args.patience,
+    )
     full_ensemble_preds = pipeline.full_ensemble_preds
     full_metrics = compute_binary_metrics(full_ensemble_preds, pipeline.targets)
     full_macro = student_macro_auc(full_ensemble_preds, pipeline.targets, pipeline.ctx.student_index)
@@ -1055,7 +1269,7 @@ def main():
     full_stratified = pipeline.compute_stratified_evaluation(full_ensemble_preds)
     full_psychometrics = pipeline.compute_item_difficulty_correlations(pipeline.full_fold_props)
 
-    # Load External Baseline Benchmark Predictions from disk for Statistical Comparison
+    # Load External Baseline Benchmark Predictions from disk for Statistical Comparison (dataset-isolated)
     baseline_keys = ["dkt", "dkvmn", "sakt", "mg_mmkt", "mg_mmkt_v2"]
     baseline_ensemble_preds: Dict[str, np.ndarray] = {}
     baseline_fold_aucs: Dict[str, List[float]] = {}
@@ -1065,17 +1279,18 @@ def main():
         b_name = normalize_baseline_name(b)
         b_preds = []
         b_aucs = []
-        for f in range(5):
+        for f in args.folds:
             if b in ["dkt", "dkvmn", "sakt", "mg_mmkt"]:
-                p_file = f"outputs/checkpoints/{b}_fold{f}/test_preds.npy"
-            elif b == "mg_mmkt_v2":
-                p_file = f"outputs/checkpoints/v2_full_5fold/mg_mmkt_v2_fold{f}/test_preds.npy"
+                p_file = os.path.join(pipeline.checkpoints_base, f"{b}_fold{f}", "test_preds.npy")
+            else:
+                p_file = os.path.join(pipeline.checkpoints_base, "v2_full_5fold", f"mg_mmkt_v2_fold{f}", "test_preds.npy")
             if os.path.exists(p_file):
                 arr = np.load(p_file).astype(np.float64)
-                b_preds.append(arr)
-                b_aucs.append(float(compute_binary_metrics(arr, pipeline.targets)["auc"]))
+                if len(arr) == len(pipeline.targets):
+                    b_preds.append(arr)
+                    b_aucs.append(float(compute_binary_metrics(arr, pipeline.targets)["auc"]))
 
-        if len(b_preds) == 5:
+        if len(b_preds) == len(args.folds):
             ens_p = np.mean(b_preds, axis=0)
             baseline_ensemble_preds[b_name] = ens_p
             baseline_fold_aucs[b_name] = b_aucs
@@ -1104,7 +1319,7 @@ def main():
             folds=args.folds,
             eval_only=args.eval_only,
             num_epochs=args.num_epochs,
-            batch_size=args.batch_size,
+            batch_size=pipeline.batch_size,
             lr=args.lr,
             patience=args.patience,
         )
@@ -1119,12 +1334,12 @@ def main():
     for ab_id in ["1", "2", "3"]:
         if ab_id not in ablation_results:
             suf = report_suffix_map[ab_id]
-            json_file = os.path.join(pipeline.reports_base, f"acd_mmkt_v3_5fold_report{suf}.json")
+            json_file = os.path.join(pipeline.reports_base, f"acd_mmkt_v3_5fold_report{suf}{pipeline.split_tag}.json")
             if os.path.exists(json_file):
                 try:
                     with open(json_file, "r", encoding="utf-8") as f:
                         prev_data = json.load(f)
-                    ens_p_file = os.path.join(pipeline.checkpoints_base, f"acd_mmkt_v3{suf}_5fold", "ensemble_predictions.npy")
+                    ens_p_file = os.path.join(pipeline.checkpoints_base, f"acd_mmkt_v3{suf}_5fold", f"ensemble_predictions{pipeline.split_tag}.npy")
                     ens_p = np.load(ens_p_file).astype(np.float64) if os.path.exists(ens_p_file) else None
                     ablation_results[ab_id] = {
                         "ablation_key": ab_id,
@@ -1266,8 +1481,8 @@ def main():
         if res["ensemble_preds"] is None or len(res["single_fold_metrics"]) == 0:
             continue
         suf = res["report_suffix"]
-        json_out = os.path.join(pipeline.reports_base, f"acd_mmkt_v3_5fold_report{suf}.json")
-        md_out = os.path.join(pipeline.reports_base, f"acd_mmkt_v3_5fold_report{suf}.md")
+        json_out = os.path.join(pipeline.reports_base, f"acd_mmkt_v3_5fold_report{suf}{pipeline.split_tag}.json")
+        md_out = os.path.join(pipeline.reports_base, f"acd_mmkt_v3_5fold_report{suf}{pipeline.split_tag}.md")
 
         out_data = {
             "model_name": "ACD-MMKTv3",
@@ -1293,19 +1508,29 @@ def main():
             stat_tests=stat_tests_per_ablation[ab_key],
             psychometrics=all_psychometrics[ab_key],
             output_path=md_out,
+            dataset_display=pipeline.display_name,
+            num_test_interactions=pipeline.num_test_interactions,
+            num_students=int(pipeline.ctx.student_index.max() + 1),
+            checkpoints_base=pipeline.checkpoints_base,
         )
         logger.info(f"Saved {md_out}")
 
     # 7. Generate Master Comprehensive Synthesis Report
-    master_json_path = os.path.join(pipeline.reports_base, "acd_mmkt_v3_modality_ablation_study_comprehensive.json")
-    master_md_path = os.path.join(pipeline.reports_base, "acd_mmkt_v3_modality_ablation_study_comprehensive_report.md")
+    master_json_path = os.path.join(
+        pipeline.reports_base,
+        f"acd_mmkt_v3_modality_ablation_study_comprehensive{pipeline.split_tag}.json",
+    )
+    master_md_path = os.path.join(
+        pipeline.reports_base,
+        f"acd_mmkt_v3_modality_ablation_study_comprehensive{pipeline.split_tag}_report.md",
+    )
 
     # Map parameter counts dynamically
     param_counts = {
-        "Full ACD-MMKTv3": 892936,
-        "Ablation 3 (w/o Visual)": ablation_results.get("3", {}).get("total_params", 529032),
-        "Ablation 2 (w/o Solution)": ablation_results.get("2", {}).get("total_params", 728328),
-        "Ablation 1 (Pure KC)": ablation_results.get("1", {}).get("total_params", 350088),
+        "Full ACD-MMKTv3": pipeline.full_total_params,
+        "Ablation 3 (w/o Visual)": ablation_results.get("3", {}).get("total_params", 0),
+        "Ablation 2 (w/o Solution)": ablation_results.get("2", {}).get("total_params", 0),
+        "Ablation 1 (Pure KC)": ablation_results.get("1", {}).get("total_params", 0),
     }
 
     full_mean_metrics = {
@@ -1315,8 +1540,10 @@ def main():
 
     master_data = {
         "metadata": {
-            "dataset": "XES3G5M",
-            "num_test_interactions": NUM_TEST_INTERACTIONS,
+            "dataset": pipeline.display_name,
+            "test_split": pipeline.test_split if pipeline.dataset_key == "eedi" else "unified",
+            "post_diag_mode": pipeline.model_cfg_base.get("post_diag_mode", "none"),
+            "num_test_interactions": pipeline.num_test_interactions,
             "num_students": int(pipeline.ctx.student_index.max() + 1),
             "evaluated_models": list(all_models_dict.keys()),
             "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),

@@ -50,9 +50,14 @@ class ACDv3ExplainabilityEngine:
         if aux_metadata_path and os.path.exists(aux_metadata_path):
             self.aux_metadata = torch.load(aux_metadata_path, map_location="cpu", weights_only=False)
         else:
-            default_aux = os.path.join("data", "processed", "XES3G5M", "acd_v3_aux_metadata.pt")
+            num_q = getattr(model, "num_questions", None)
+            dataset_folder = "Eedi" if num_q == 948 else "XES3G5M"
+            default_aux = os.path.join("data", "processed", dataset_folder, "acd_v3_aux_metadata.pt")
             if os.path.exists(default_aux):
-                self.aux_metadata = torch.load(default_aux, map_location="cpu", weights_only=False)
+                loaded_aux = torch.load(default_aux, map_location="cpu", weights_only=False)
+                tok_q = loaded_aux.get("token_to_word_q")
+                if num_q is None or tok_q is None or len(tok_q) == num_q:
+                    self.aux_metadata = loaded_aux
 
     def get_token_strings(self, q_id: int, branch: str = "q") -> List[str]:
         """Retrieve token strings list for a given question and branch ('q' or 's')."""

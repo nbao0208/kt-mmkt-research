@@ -40,7 +40,13 @@ os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 # Ensure project root is in sys.path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from src.data.xes3g5m_dataset import get_xes3g5m_dataloaders
+from src.data.dataset_router import (
+    resolve_dataset_key,
+    resolve_dataset_paths,
+    resolve_split_tag,
+    get_dataloaders_for_dataset,
+    load_acd_v3_fold_metadata,
+)
 from src.evaluation.metrics import calculate_metrics
 from src.models.mmkt.acd_mmkt_v3 import ACDMMKTv3
 from src.training.acd_v3_trainer import ACDMMKTv3Trainer
@@ -110,9 +116,12 @@ def resolve_ablation_preset(
 
 def parse_args():
     parser = argparse.ArgumentParser(description="5-Fold Cross-Validation runner for ACD-MMKTv3.")
+    parser.add_argument("--dataset", type=str, choices=["xes3g5m", "eedi"], default=None, help="Target dataset shortcut ('xes3g5m' or 'eedi')")
     parser.add_argument("--config-model", type=str, default="configs/model/acd_mmkt_v3.yaml", help="Path to model config")
-    parser.add_argument("--config-train", type=str, default="configs/train_acd_mmkt_v3.yaml", help="Path to training config")
-    parser.add_argument("--config-dataset", type=str, default="configs/dataset/xes3g5m.yaml", help="Path to dataset config")
+    parser.add_argument("--config-train", type=str, default=None, help="Path to training config")
+    parser.add_argument("--config-dataset", type=str, default=None, help="Path to dataset config")
+    parser.add_argument("--test-split", type=str, choices=["unified", "public", "private"], default=None, help="Eedi test split ('unified', 'public', or 'private')")
+    parser.add_argument("--post-diag-mode", type=str, choices=["none", "behavioral", "diagnostic"], default=None, help="Override post-response diagnostic vector mode")
     parser.add_argument("--folds", type=int, nargs="+", default=[0, 1, 2, 3, 4], help="Folds to execute (default: 0 1 2 3 4)")
     parser.add_argument("--num-epochs", type=int, default=None, help="Number of epochs per fold")
     parser.add_argument("--batch-size", type=int, default=None, help="Mini-batch size")
@@ -288,7 +297,9 @@ def train_and_eval_single_fold(
     logger.info("=" * 60)
     logger.info(f"=== PROCESSING FOLD {val_fold} ON DEVICE {device_str} ===")
 
-    data_dir = dataset_cfg.get("data_dir", "data/processed/XES3G5M")
+    data_dir = getattr(args, "data_dir", None) or dataset_cfg.get("data_dir", "data/processed/XES3G5M")
+    dataset_key = getattr(args, "dataset_key", "xes3g5m")
+    test_split = getattr(args, "test_split", "unified") or "unified"
     exp_folder = getattr(args, "exp_folder", "acd_mmkt_v3_full_5fold")
     if os.path.basename(args.checkpoint_dir) == exp_folder:
         base_ckpt_dir = args.checkpoint_dir
@@ -297,8 +308,9 @@ def train_and_eval_single_fold(
 
     fold_save_dir = os.path.join(base_ckpt_dir, f"acd_mmkt_v3_fold{val_fold}")
     best_model_path = os.path.join(fold_save_dir, "best_model.pt")
-    pred_save_path = os.path.join(fold_save_dir, "test_predictions.npy")
-    target_save_path = os.path.join(fold_save_dir, "test_targets.npy")
+    split_tag = resolve_split_tag(dataset_key, test_split)
+    pred_save_path = os.path.join(fold_save_dir, f"test_predictions{split_tag}.npy")
+    target_save_path = os.path.join(fold_save_dir, f"test_targets{split_tag}.npy")
 
     os.makedirs(fold_save_dir, exist_ok=True)
 
@@ -319,29 +331,25 @@ def train_and_eval_single_fold(
     p_drop = train_cfg.get("p_drop", model_cfg.get("p_visual_drop", 0.15))
 
     # 1. Load Data
-    train_loader, val_loader, test_loader, item_bank = get_xes3g5m_dataloaders(
+    train_loader, val_loader, test_loader, item_bank = get_dataloaders_for_dataset(
+        dataset_key=dataset_key,
         data_dir=data_dir,
         val_fold=val_fold,
         model_type="acd_mmkt_v3",
         batch_size=batch_size,
         test_batch_size=test_batch_size,
         p_drop=p_drop,
-        test_stride=train_cfg.get("test_stride", 100),
+        test_stride=train_cfg.get("test_stride", dataset_cfg.get("test_stride", 100)),
         num_workers=num_workers,
+        test_split=test_split,
     )
 
-    aux_path = os.path.join(data_dir, "acd_v3_aux_metadata.pt")
-    if os.path.exists(aux_path):
-        aux_data = torch.load(aux_path, map_location="cpu")
-        mu_concept_prior = aux_data["mu_concept_folds"][val_fold]
-        n_q = aux_data["N_q_folds"][val_fold]
-        d_q = aux_data["D_q_folds"][val_fold]
-        omega_q = aux_data["omega_q_folds"][val_fold]
-    else:
-        mu_concept_prior = torch.full((7652,), -1.37)
-        n_q = torch.zeros(7652, dtype=torch.int64)
-        d_q = torch.full((7652,), 0.20)
-        omega_q = torch.zeros(7652)
+    num_questions = int(item_bank["modality_masks"].size(0))
+    fold_meta = load_acd_v3_fold_metadata(data_dir=data_dir, val_fold=val_fold, num_questions=num_questions)
+    mu_concept_prior = fold_meta["mu_concept_prior"]
+    n_q = fold_meta["n_q"]
+    d_q = fold_meta["d_q"]
+    omega_q = fold_meta["omega_q"]
 
     device = torch.device(device_str)
 
@@ -408,7 +416,7 @@ def train_and_eval_single_fold(
     if not os.path.exists(best_model_path):
         raise FileNotFoundError(f"Checkpoint not found: {best_model_path}")
 
-    ckpt = torch.load(best_model_path, map_location=device)
+    ckpt = torch.load(best_model_path, map_location=device, weights_only=False)
     model.load_state_dict(ckpt["model_state_dict"])
     model.eval()
 
@@ -485,6 +493,12 @@ def run_dual_gpu_parallel(args, model_cfg, train_cfg, dataset_cfg, logger):
         "--output-report-dir",
         args.output_report_dir,
     ]
+    if args.dataset:
+        common_args.extend(["--dataset", args.dataset])
+    if args.test_split:
+        common_args.extend(["--test-split", args.test_split])
+    if args.post_diag_mode:
+        common_args.extend(["--post-diag-mode", args.post_diag_mode])
     if args.ablation:
         common_args.extend(["--ablation", str(args.ablation)])
     if args.num_epochs:
@@ -531,15 +545,19 @@ def generate_markdown_report(
     stat_tests = report_data["statistical_tests"]
     ablation = report_data["ablation_preset"]
 
+    dataset_display = report_data.get("dataset", "XES3G5M")
+    n_test = report_data.get("num_test_interactions", 0)
     lines = [
         f"# ACD-MMKTv3 5-Fold Cross-Validation Evaluation Report (pyKT Protocol)",
         f"",
         f"- **Model**: ACD-MMKTv3 (Asymmetric Causal-Disentangled Multimodal Knowledge Tracing v3)",
+        f"- **Dataset**: {dataset_display} ({n_test:,} evaluated test interactions)",
         f"- **Ablation Preset**: `{ablation}`",
+        f"- **Post-Diagnostic Mode**: `{report_data.get('post_diag_mode', 'none')}`",
         f"- **Generated At**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
         f"- **Total Runtime**: {report_data.get('total_time_mins', 0.0):.2f} minutes",
         f"",
-        f"## 1. Single-Fold Test Results (XES3G5M Independent Test Set)",
+        f"## 1. Single-Fold Test Results ({dataset_display} Independent Test Set)",
         f"",
         f"| Fold | Test AUC | Test ACC |",
         f"|:---:|:---:|:---:|",
@@ -588,9 +606,38 @@ def generate_markdown_report(
 def main():
     args = parse_args()
 
+    if args.config_dataset is None:
+        args.config_dataset = "configs/dataset/eedi_task34.yaml" if args.dataset == "eedi" else "configs/dataset/xes3g5m.yaml"
+    dataset_cfg = load_yaml_config(args.config_dataset)
+    dataset_key = resolve_dataset_key(dataset_cfg=dataset_cfg, dataset_arg=args.dataset)
+
+    if args.config_train is None:
+        eedi_train_cfg = "configs/train_acd_mmkt_v3_eedi.yaml"
+        args.config_train = eedi_train_cfg if (dataset_key == "eedi" and os.path.exists(eedi_train_cfg)) else "configs/train_acd_mmkt_v3.yaml"
+
     model_cfg = load_yaml_config(args.config_model)
     train_cfg = load_yaml_config(args.config_train)
-    dataset_cfg = load_yaml_config(args.config_dataset)
+    paths = resolve_dataset_paths(
+        dataset_key=dataset_key,
+        dataset_cfg=dataset_cfg,
+        train_cfg=train_cfg,
+        checkpoint_dir=args.checkpoint_dir,
+        output_report_dir=args.output_report_dir,
+    )
+    args.checkpoint_dir = paths["checkpoint_dir"]
+    args.output_report_dir = paths["output_report_dir"]
+    args.data_dir = paths["data_dir"]
+    args.dataset_key = dataset_key
+    args.test_split = args.test_split or train_cfg.get("test_split", "unified")
+
+    if args.post_diag_mode is not None:
+        model_cfg["post_diag_mode"] = args.post_diag_mode
+    elif "post_diag_mode" in train_cfg and train_cfg["post_diag_mode"] is not None:
+        model_cfg["post_diag_mode"] = train_cfg["post_diag_mode"]
+
+    model_cfg["dataset_name"] = paths["display_name"]
+    model_cfg["num_questions"] = dataset_cfg.get("num_questions", model_cfg.get("num_questions", 7652))
+    model_cfg["num_kcs"] = dataset_cfg.get("num_kcs", model_cfg.get("num_kcs", 1175))
 
     # Set seed for reproducible cross-validation
     seed = train_cfg.get("seed", 42)
@@ -603,12 +650,13 @@ def main():
     args.display_title = display_title
 
     # Configure file logging
+    os.makedirs(paths["log_dir"], exist_ok=True)
     log_file = os.path.join(
-        "outputs",
-        "logs",
+        paths["log_dir"],
         f"run_5fold_acd_mmkt_v3{suffix}.log",
     )
     logger = get_logger("run_5fold_acd_mmkt_v3", log_file=log_file)
+    logger.info(f"Target Dataset: {paths['display_name']} (key={dataset_key}, split={args.test_split}, post_diag_mode={model_cfg.get('post_diag_mode', 'none')})")
     logger.info(f"Target Architecture Preset: {display_title} (Folder: {exp_folder})")
 
     # Apply hardware profile if specified
@@ -748,6 +796,10 @@ def main():
     os.makedirs(args.output_report_dir, exist_ok=True)
     report_data = {
         "model_name": "ACD-MMKTv3",
+        "dataset": paths["display_name"],
+        "test_split": args.test_split if dataset_key == "eedi" else "unified",
+        "post_diag_mode": model_cfg.get("post_diag_mode", "none"),
+        "num_test_interactions": int(len(targets_all)) if targets_all is not None else 0,
         "ablation_preset": args.ablation or "full",
         "display_title": getattr(args, "display_title", "Full ACD-MMKTv3"),
         "single_fold_metrics": fold_metrics,
@@ -766,8 +818,9 @@ def main():
     }
 
     suffix = getattr(args, "ablation_suffix", "")
-    report_path_json = os.path.join(args.output_report_dir, f"acd_mmkt_v3_5fold_report{suffix}.json")
-    report_path_md = os.path.join(args.output_report_dir, f"acd_mmkt_v3_5fold_report{suffix}.md")
+    report_split_tag = resolve_split_tag(dataset_key, args.test_split)
+    report_path_json = os.path.join(args.output_report_dir, f"acd_mmkt_v3_5fold_report{suffix}{report_split_tag}.json")
+    report_path_md = os.path.join(args.output_report_dir, f"acd_mmkt_v3_5fold_report{suffix}{report_split_tag}.md")
 
     with open(report_path_json, "w", encoding="utf-8") as f:
         json.dump(report_data, f, indent=2)

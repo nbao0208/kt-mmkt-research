@@ -39,9 +39,15 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 from src.utils.logger import get_logger
 from src.utils.config import load_yaml_config
-from src.data.xes3g5m_dataset import get_xes3g5m_dataloaders
+from src.data.dataset_router import (
+    resolve_dataset_key,
+    resolve_dataset_paths,
+    get_dataloaders_for_dataset,
+    load_acd_v3_fold_metadata,
+)
 from src.models.mmkt.acd_mmkt_v3 import ACDMMKTv3
-from src.evaluation.metrics import calculate_metrics, multimodal_stratified_evaluation
+from src.evaluation.metrics import calculate_metrics
+from src.evaluation.eedi_test_context import evaluate_task3_expert_pairs
 from src.evaluation.acd_v3_explainability import ACDv3ExplainabilityEngine
 
 
@@ -62,10 +68,12 @@ def safe_spearmanr(x: np.ndarray, y: np.ndarray) -> Tuple[float, float]:
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Evaluate trained ACD-MMKTv3 model on XES3G5M.")
+    parser = argparse.ArgumentParser(description="Evaluate trained ACD-MMKTv3 model on XES3G5M or Eedi.")
     parser.add_argument("--checkpoint", type=str, required=True, help="Path to trained model checkpoint (.pt)")
+    parser.add_argument("--dataset", type=str, choices=["xes3g5m", "eedi"], default=None, help="Target dataset ('xes3g5m' or 'eedi')")
     parser.add_argument("--config-model", type=str, default="configs/model/acd_mmkt_v3.yaml", help="Path to model config")
-    parser.add_argument("--config-dataset", type=str, default="configs/dataset/xes3g5m.yaml", help="Path to dataset config")
+    parser.add_argument("--config-dataset", type=str, default=None, help="Path to dataset config")
+    parser.add_argument("--test-split", type=str, choices=["unified", "public", "private"], default="unified", help="Eedi test split ('unified', 'public', or 'private')")
     parser.add_argument("--val-fold", type=int, default=None, help="Fold index (default: auto-detected from checkpoint)")
     parser.add_argument("--batch-size", type=int, default=128, help="Batch size for evaluation")
     parser.add_argument("--test-stride", type=int, default=100, help="Test strided context window step (default: 100)")
@@ -78,7 +86,40 @@ def parse_args():
 
 def main():
     args = parse_args()
-    log_dir = "outputs/logs"
+
+    # 1. Device Selection
+    if args.device == "auto":
+        device = torch.device(
+            "cuda" if torch.cuda.is_available() else "mps" if hasattr(torch.backends, "mps") and torch.backends.mps.is_available() else "cpu"
+        )
+    else:
+        device = torch.device(args.device)
+
+    # 2. Load Checkpoint & Auto-Resolve Dataset Identity
+    ckpt = torch.load(args.checkpoint, map_location=device, weights_only=False)
+    model_cfg = load_yaml_config(args.config_model)
+    if "model_cfg" in ckpt and ckpt["model_cfg"] is not None:
+        saved_cfg = ckpt["model_cfg"]
+        for k, v in saved_cfg.items():
+            model_cfg[k] = v
+
+    inferred_dataset = args.dataset
+    if inferred_dataset is None and args.config_dataset is None:
+        ckpt_ds = str(model_cfg.get("dataset_name", "")).lower()
+        if ckpt_ds.startswith("eedi") or model_cfg.get("num_questions") == 948 or "eedi" in args.checkpoint.lower():
+            inferred_dataset = "eedi"
+        else:
+            inferred_dataset = "xes3g5m"
+
+    config_dataset_path = args.config_dataset
+    if config_dataset_path is None:
+        config_dataset_path = "configs/dataset/eedi_task34.yaml" if inferred_dataset == "eedi" else "configs/dataset/xes3g5m.yaml"
+    dataset_cfg = load_yaml_config(config_dataset_path)
+    dataset_key = resolve_dataset_key(dataset_cfg=dataset_cfg, dataset_arg=inferred_dataset)
+    paths = resolve_dataset_paths(dataset_key=dataset_key, dataset_cfg=dataset_cfg)
+    data_dir = paths["data_dir"]
+
+    log_dir = paths["log_dir"]
     os.makedirs(log_dir, exist_ok=True)
 
     # Derive log filename suffix if checkpoint belongs to an ablation variant
@@ -96,30 +137,9 @@ def main():
             break
     log_filename = f"evaluate_acd_mmkt_v3{log_suffix}.log"
     logger = get_logger("evaluate_acd_mmkt_v3", log_file=os.path.join(log_dir, log_filename))
-    logger.info("=== ACD-MMKTv3 Comprehensive Evaluation and Psychometric Analysis ===")
-
-    # 1. Device Selection
-    if args.device == "auto":
-        device = torch.device(
-            "cuda" if torch.cuda.is_available() else "mps" if hasattr(torch.backends, "mps") and torch.backends.mps.is_available() else "cpu"
-        )
-    else:
-        device = torch.device(args.device)
+    logger.info(f"=== ACD-MMKTv3 Comprehensive Evaluation ({paths['display_name']}) ===")
     logger.info(f"Compute Device: {device}")
-
-    # 2. Load Configurations & Data
-    model_cfg = load_yaml_config(args.config_model)
-    dataset_cfg = load_yaml_config(args.config_dataset)
-    data_dir = dataset_cfg.get("data_dir", "data/processed/XES3G5M")
-
-    # 3. Load Checkpoint & Restore Exact Model Configuration
-    logger.info(f"Loading checkpoint from {args.checkpoint}...")
-    ckpt = torch.load(args.checkpoint, map_location=device)
-    if "model_cfg" in ckpt and ckpt["model_cfg"] is not None:
-        saved_cfg = ckpt["model_cfg"]
-        logger.info(f"Restoring exact architecture hyperparameters from checkpoint: {saved_cfg}")
-        for k, v in saved_cfg.items():
-            model_cfg[k] = v
+    logger.info(f"Loaded checkpoint from {args.checkpoint} | model_cfg={model_cfg}")
 
     # Auto-resolve validation fold to prevent cross-fold anchor leakage
     val_fold = args.val_fold
@@ -129,8 +149,9 @@ def main():
     else:
         logger.info(f"Using explicitly specified validation fold: fold {val_fold}")
 
-    logger.info(f"Loading data from {data_dir} (val_fold={val_fold}, model_type='acd_mmkt_v3')...")
-    _, _, test_loader, item_bank = get_xes3g5m_dataloaders(
+    logger.info(f"Loading {paths['display_name']} data from {data_dir} (val_fold={val_fold}, split={args.test_split})...")
+    _, _, test_loader, item_bank = get_dataloaders_for_dataset(
+        dataset_key=dataset_key,
         data_dir=data_dir,
         val_fold=val_fold,
         model_type="acd_mmkt_v3",
@@ -139,19 +160,16 @@ def main():
         p_drop=0.0,
         test_stride=args.test_stride,
         num_workers=args.num_workers,
+        test_split=args.test_split,
     )
 
-    # Load fold auxiliary metadata
-    aux_path = os.path.join(data_dir, "acd_v3_aux_metadata.pt")
-    if os.path.exists(aux_path):
-        aux_data = torch.load(aux_path, map_location="cpu")
-        mu_concept_prior = aux_data["mu_concept_folds"][val_fold].to(device)
-        mu_prior_prob = aux_data["mu_prior_folds"][val_fold].numpy()
-        n_q_train = aux_data["N_q_folds"][val_fold].numpy()
-    else:
-        mu_concept_prior = torch.full((7652,), -1.37, device=device)
-        mu_prior_prob = np.full(7652, 0.20)
-        n_q_train = np.zeros(7652)
+    num_questions = int(item_bank["modality_masks"].size(0))
+    fold_meta = load_acd_v3_fold_metadata(data_dir=data_dir, val_fold=val_fold, num_questions=num_questions)
+    aux_data = fold_meta["aux_data"]
+    aux_path = fold_meta["aux_path"]
+    mu_concept_prior = fold_meta["mu_concept_prior"].to(device)
+    mu_prior_prob = fold_meta["mu_prior_prob"].numpy()
+    n_q_train = fold_meta["n_q"].numpy()
 
     # 4. Instantiate Model and Load Weights
     logger.info("Instantiating ACDMMKTv3 architecture...")
@@ -180,7 +198,7 @@ def main():
 
     # Cache raw modality masks and static context before releasing item_bank
     raw_masks_all = item_bank["modality_masks"].numpy()
-    static_ctx_all = item_bank.get("question_static_ctx", torch.zeros((7652, 15), dtype=torch.float32)).numpy()
+    static_ctx_all = item_bank.get("question_static_ctx", torch.zeros((num_questions, 15), dtype=torch.float32)).numpy()
     del item_bank
     import gc
     gc.collect()
@@ -188,8 +206,8 @@ def main():
     model.load_state_dict(ckpt["model_state_dict"], strict=True)
     model.eval()
 
-    # Precompute all 7,652 static question representations once for inference
-    logger.info("Precomputing offline item bank representations for fast evaluation...")
+    # Precompute all static question representations once for inference
+    logger.info(f"Precomputing offline item bank representations ({num_questions} items) for fast evaluation...")
     model.precompute_item_bank_cache(mu_concept_prior)
     cached_props = model.cached_item_properties
 
@@ -246,7 +264,12 @@ def main():
 
         total_valid += int(mask_np.sum())
 
-    logger.info(f"Total evaluated test interactions: {total_valid:,} (Expected: 1,099,197)")
+    expected_valid = (
+        {"unified": 124_960, "public": 74_276, "private": 50_684}.get(args.test_split, total_valid)
+        if dataset_key == "eedi"
+        else 1_099_197
+    )
+    logger.info(f"Total evaluated test interactions: {total_valid:,} (Expected: {expected_valid:,})")
 
     preds_arr = np.concatenate(all_preds).astype(np.float32)
     targets_arr = np.concatenate(all_targets).astype(np.int64)
@@ -380,22 +403,81 @@ def main():
     logger.info(f"  Stem Visual Load Delta_mu_vis (on image items): Pearson r = {vis_r:.4f}")
     logger.info(f"  Solution Load Delta_mu_sol: Pearson r = {delta_sol_r:.4f}")
 
-    # Cognitive gate lambda_q statistics across math domains
-    domain_names = [
-        "Plane Geometry", "Solid Geometry", "Functions", "Algebra",
-        "Arithmetic", "Probability & Combinatorics", "Number Theory",
-        "Sequences", "Trigonometry", "Analytic Geometry",
-    ]
+    # Cognitive gate lambda_q statistics across math domains / Eedi layouts
     bar_lambda_all = cached_props["bar_lambda_q"].cpu().numpy().reshape(-1)
     domain_stats = {}
     logger.info("=== COGNITIVE GATE INTENSITY (bar_lambda_q) ACROSS MATH DOMAINS ===")
-    for d_idx, d_name in enumerate(domain_names):
-        d_mask = (static_ctx_all[:, 2 + d_idx] > 0.5) & (raw_masks_all[:, 0] > 0.5)
-        if d_mask.any():
-            mean_l = float(bar_lambda_all[d_mask].mean())
-            std_l = float(bar_lambda_all[d_mask].std())
-            domain_stats[d_name] = {"count": int(d_mask.sum()), "mean_lambda": mean_l, "std_lambda": std_l}
-            logger.info(f"  [{d_name}] N={int(d_mask.sum())}, Mean bar_lambda_q: {mean_l:.4f} ± {std_l:.4f}")
+    if dataset_key == "eedi":
+        domain_specs = [
+            ("Number", 1),
+            ("Geometry and Measure", 2),
+            ("Algebra", 3),
+            ("Layout: Horizontal", 4),
+            ("Layout: Grid 2x2", 5),
+            ("Layout: Vertical", 6),
+        ]
+        for d_name, col_idx in domain_specs:
+            d_mask = (static_ctx_all[:, col_idx] > 0.5) & (raw_masks_all[:, 0] > 0.5)
+            if d_mask.any():
+                mean_l = float(bar_lambda_all[d_mask].mean())
+                std_l = float(bar_lambda_all[d_mask].std())
+                domain_stats[d_name] = {"count": int(d_mask.sum()), "mean_lambda": mean_l, "std_lambda": std_l}
+                logger.info(f"  [{d_name}] N={int(d_mask.sum())}, Mean bar_lambda_q: {mean_l:.4f} ± {std_l:.4f}")
+    else:
+        domain_names = [
+            "Plane Geometry", "Solid Geometry", "Functions", "Algebra",
+            "Arithmetic", "Probability & Combinatorics", "Number Theory",
+            "Sequences", "Trigonometry", "Analytic Geometry",
+        ]
+        for d_idx, d_name in enumerate(domain_names):
+            d_mask = (static_ctx_all[:, 2 + d_idx] > 0.5) & (raw_masks_all[:, 0] > 0.5)
+            if d_mask.any():
+                mean_l = float(bar_lambda_all[d_mask].mean())
+                std_l = float(bar_lambda_all[d_mask].std())
+                domain_stats[d_name] = {"count": int(d_mask.sum()), "mean_lambda": mean_l, "std_lambda": std_l}
+                logger.info(f"  [{d_name}] N={int(d_mask.sum())}, Mean bar_lambda_q: {mean_l:.4f} ± {std_l:.4f}")
+
+    # Optional Eedi-specific strata & Task 3 Expert Pair validation
+    eedi_extra_strata: Dict[str, Any] = {}
+    task3_eval: Optional[Dict[str, Any]] = None
+    if dataset_key == "eedi":
+        strata_path = os.path.join(data_dir, "test_strata_masks.pt")
+        seq_filename = {
+            "unified": "sequences_test.pt",
+            "public": "sequences_test_public.pt",
+            "private": "sequences_test_private.pt",
+        }[args.test_split]
+        seq_path = os.path.join(data_dir, seq_filename)
+        if os.path.exists(strata_path) and os.path.exists(seq_path):
+            raw_strata = torch.load(strata_path, map_location="cpu").get(args.test_split, {})
+            seq_eval_2d = torch.load(seq_path, map_location="cpu")["eval_mask"].bool()
+            logger.info("=== EEDI PEDAGOGICAL & DIAGNOSTIC STRATIFICATION ===")
+            for s_key in [
+                "after_dom_misconception",
+                "after_overconfident_error",
+                "layout_horizontal",
+                "layout_grid",
+                "layout_vertical",
+                "domain_number",
+                "domain_algebra",
+                "domain_geometry",
+                "within_quiz_burst",
+                "cross_session",
+                "task4_any_target_split",
+            ]:
+                if s_key in raw_strata:
+                    s_mask_1d = raw_strata[s_key].bool()[seq_eval_2d].numpy()
+                    eedi_extra_strata[s_key] = get_subset_metrics(s_mask_1d, f"Eedi/{s_key}")
+
+        if aux_data is not None and "task3_expert_pairs" in aux_data:
+            a_q_all = cached_props["a_q"].cpu().numpy()
+            tilde_mu_all = cached_props["tilde_mu"].cpu().numpy()
+            task3_eval = evaluate_task3_expert_pairs(a_q_all, tilde_mu_all, aux_data["task3_expert_pairs"])
+            logger.info(
+                f"=== EEDI TASK 3 EXPERT PAIRWISE AGREEMENT (N={task3_eval['num_pairs']}) === "
+                f"a_q={task3_eval['a_q_agreement']:.4f} ({task3_eval['a_q_correct']}/{task3_eval['num_pairs']}), "
+                f"strong={task3_eval['a_q_strong_consensus_agreement']:.4f}"
+            )
 
     # 12. 4-Tier Explainability Diagnostic Sample
     explain_engine = ACDv3ExplainabilityEngine(model=model, aux_metadata_path=aux_path, device=device)
@@ -416,6 +498,8 @@ def main():
     # Compile Evaluation Summary Dictionary
     eval_summary = {
         "model_name": "ACD-MMKTv3",
+        "dataset": paths["display_name"],
+        "test_split": args.test_split if dataset_key == "eedi" else "unified",
         "checkpoint": args.checkpoint,
         "val_fold": val_fold,
         "total_evaluated_interactions": total_valid,
@@ -458,6 +542,8 @@ def main():
             "active_items_count": len(active_test_qs),
         },
         "domain_gate_intensity": domain_stats,
+        "eedi_stratification": eedi_extra_strata,
+        "task3_expert_validation": task3_eval,
     }
 
     if args.output_report:
