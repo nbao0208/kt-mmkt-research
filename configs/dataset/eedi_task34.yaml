@@ -1,0 +1,82 @@
+# Dataset and Preprocessing Configuration for Eedi NeurIPS 2020 (Task 3 & 4)
+dataset_name: "Eedi"
+raw_data_dir: "data/raw/Eedi NeurIPS 2020/data_extracted/data"
+data_dir: "data/processed/Eedi"
+features_dir: "data/features/Eedi"
+splits_dir: "data/splits/Eedi"
+
+# Canonical Index Spaces
+num_questions: 948
+num_unique_images: 947
+num_kcs: 85
+num_leaf_kcs: 57
+num_l2_kcs: 25
+num_l1_kcs: 3
+root_subject_id: 3
+num_options: 4
+
+# Sequence and Windowing Parameters (pyKT Compliant)
+max_seq_len: 200
+test_stride: 100
+p_drop: 0.15
+p_drop_mg: 0.20
+seed: 42
+
+# Multimodal Token and Spatial Patch Budgets
+max_token_len_q: 128
+max_token_len_s: 160
+num_patches: 49
+target_image_size: 224
+std_slide_width: 640
+std_slide_height: 480
+
+# Frozen Pretrained Backbones
+text:
+  model_name: "roberta-base"
+  d_raw: 768
+
+vision:
+  model_name: "openai/clip-vit-base-patch16"
+  d_raw: 768
+
+# Local OCR & VLM Configuration (for Offline Step 3 & Step 4)
+ocr_vlm:
+  vlm_model: "qwen2.5vl:3b"
+  llm_model: "qwen2.5:7b"
+  ollama_url: "http://127.0.0.1:11434/api/generate"
+
+# Slide Anatomy & Badge Detection Thresholds (640x480 standardized canvas)
+slide_anatomy:
+  header_y_end: 46
+  footer_y_start: 442
+  content_x_min: 15
+  content_x_max: 625
+  horiz_dy_thresh: 35.0
+  vert_dx_thresh: 35.0
+  badge_radius: 26
+  badge_color_dist_thresh: 38.0
+  struct_density_thresh: 0.03
+
+# Hierarchical Hypergraph Weights
+hypergraph:
+  alpha_l3: 1.0
+  alpha_l2: 0.5
+  alpha_l1: 0.15
+  alpha_l0: 0.0
+  eps: 1.0e-8
+
+# Hierarchical Empirical Bayes CTT Parameters (Anti-Triple-Shrinkage)
+ctt:
+  kappa: 10.0
+  m_kc: 10.0
+  m_item: 1.0
+  dirichlet_alpha: 1.0
+
+# Temporal Dynamics & Context Parameters
+temporal:
+  max_lag_seconds: 10000000.0
+  log_max_lag: 16.11809565
+  global_train_acc_prior: 0.537332
+  overconfident_thresh: 0.75
+  cold_start_thresh: 10
+  frequent_thresh: 100

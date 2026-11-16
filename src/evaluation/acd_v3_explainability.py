@@ -48,11 +48,11 @@ class ACDv3ExplainabilityEngine:
         self.aux_metadata = None
 
         if aux_metadata_path and os.path.exists(aux_metadata_path):
-            self.aux_metadata = torch.load(aux_metadata_path, map_location="cpu")
+            self.aux_metadata = torch.load(aux_metadata_path, map_location="cpu", weights_only=False)
         else:
             default_aux = os.path.join("data", "processed", "XES3G5M", "acd_v3_aux_metadata.pt")
             if os.path.exists(default_aux):
-                self.aux_metadata = torch.load(default_aux, map_location="cpu")
+                self.aux_metadata = torch.load(default_aux, map_location="cpu", weights_only=False)
 
     def get_token_strings(self, q_id: int, branch: str = "q") -> List[str]:
         """Retrieve token strings list for a given question and branch ('q' or 's')."""
@@ -60,7 +60,13 @@ class ACDv3ExplainabilityEngine:
             key = "token_to_word_q" if branch == "q" else "token_to_word_s"
             if key in self.aux_metadata and q_id < len(self.aux_metadata[key]):
                 return self.aux_metadata[key][q_id]
-        return [f"token_{i}" for i in range(128 if branch == "q" else 160)]
+        if branch == "q" and hasattr(self.model, "acd_E_txt_q"):
+            seq_len = int(self.model.acd_E_txt_q.size(1))
+        elif branch == "s" and hasattr(self.model, "acd_E_txt_s"):
+            seq_len = int(self.model.acd_E_txt_s.size(1))
+        else:
+            seq_len = 128 if branch == "q" else 160
+        return [f"token_{i}" for i in range(seq_len)]
 
     @torch.no_grad()
     def explain_interaction(
@@ -107,7 +113,7 @@ class ACDv3ExplainabilityEngine:
                 if beta_q[idx] <= 1e-8:
                     continue
                 tok = tokens_q[idx] if idx < len(tokens_q) else f"tok_{idx}"
-                if tok in ("[PAD]", "[CLS]", "[SEP]"):
+                if tok in ("[PAD]", "[CLS]", "[SEP]", "<pad>", "<s>", "</s>", "<unk>"):
                     continue
                 stem_keywords.append({
                     "token": tok,
@@ -126,7 +132,7 @@ class ACDv3ExplainabilityEngine:
                 if beta_s[idx] <= 1e-8:
                     continue
                 tok = tokens_s[idx] if idx < len(tokens_s) else f"tok_{idx}"
-                if tok in ("[PAD]", "[CLS]", "[SEP]"):
+                if tok in ("[PAD]", "[CLS]", "[SEP]", "<pad>", "<s>", "</s>", "<unk>"):
                     continue
                 solution_steps.append({
                     "token": tok,

@@ -79,7 +79,7 @@ class ACDMMKTv3(nn.Module):
             use_deep_irt: Ablation 6 flag (w/o monotonic 2PL-IRT readout).
             use_hypergraph: Whether to use HGNN propagation (default: True).
             use_gram_schmidt: Whether to use Gram-Schmidt projection (default: True).
-            post_diag_mode: Post-diagnostic mode ("none" or "behavioral").
+            post_diag_mode: Post-diagnostic mode ("none", "behavioral", or "diagnostic").
         """
         super().__init__()
         self.d_model = d_model
@@ -111,16 +111,31 @@ class ACDMMKTv3(nn.Module):
         self.register_buffer("bank_modality_masks", static_item_bank["modality_masks"].float(), persistent=False)
         self.register_buffer("bank_leaf_kcs", static_item_bank["question_leaf_kcs"].long(), persistent=False)
         self.register_buffer("bank_kc_mask", static_item_bank["question_kc_mask"].bool(), persistent=False)
-        self.register_buffer("bank_static_ctx", static_item_bank.get("question_static_ctx", torch.zeros((7652, 15), dtype=torch.float32)).float(), persistent=False)
+        self.num_questions = self.bank_modality_masks.size(0)
+        self.register_buffer(
+            "bank_static_ctx",
+            static_item_bank.get(
+                "question_static_ctx",
+                torch.zeros((self.num_questions, 15), dtype=torch.float32),
+            ).float(),
+            persistent=False,
+        )
 
         # Letterbox patch mask M_patch_q
         if "M_patch_q" in static_item_bank and static_item_bank["M_patch_q"] is not None:
             self.register_buffer("bank_M_patch_q", static_item_bank["M_patch_q"].float(), persistent=False)
         else:
-            self.register_buffer("bank_M_patch_q", torch.zeros((static_item_bank["modality_masks"].size(0), 49), dtype=torch.float32), persistent=False)
+            self.register_buffer("bank_M_patch_q", torch.zeros((self.num_questions, 49), dtype=torch.float32), persistent=False)
 
-        self.num_questions = self.bank_modality_masks.size(0)
         self.num_kcs = self.acd_kc_init_emb.size(0)
+
+        # Dataset-calibrated default concept prior on logit scale (fallback when mu_concept_prior is None)
+        if "mu_concept_folds" in static_item_bank and static_item_bank["mu_concept_folds"] is not None:
+            self.default_mu_concept = float(static_item_bank["mu_concept_folds"].float().mean().item())
+        elif "mu_concept" in static_item_bank and static_item_bank["mu_concept"] is not None:
+            self.default_mu_concept = float(static_item_bank["mu_concept"].float().mean().item())
+        else:
+            self.default_mu_concept = -1.37
 
         # -------------------------------------------------------------
         # Subsystems Initialization
@@ -142,6 +157,8 @@ class ACDMMKTv3(nn.Module):
         )
 
         # Subsystem 1: Text-Guided Alignment & Cognitive Gating
+        # Only allocate solution-image projection layers if the dataset actually contains solution diagrams
+        has_solution_images = bool((self.bank_modality_masks[:, 2] > 0.5).any().item())
         self.sub1 = TextGuidedCrossAligner(
             d_raw_txt=d_raw_txt,
             d_raw_img=d_raw_img,
@@ -151,16 +168,22 @@ class ACDMMKTv3(nn.Module):
             use_visual=use_visual,
             use_solution=use_solution,
             use_multimodal=use_multimodal,
+            has_solution_images=has_solution_images,
         )
 
         # Subsystem 3: Dual-Stream Asymmetric Encoder & Unpolluted Monotonic Knowledge Retriever
-        d_post_diag = 4 if self.post_diag_mode == "behavioral" else 0
+        if self.post_diag_mode == "behavioral":
+            self.d_post_diag = 4
+        elif self.post_diag_mode == "diagnostic":
+            self.d_post_diag = int(static_item_bank.get("d_post_diag", 8))
+        else:
+            self.d_post_diag = 0
         self.sub3 = AtomicMonotonicRetriever(
             d_model=d_model,
             num_heads=num_heads,
             max_seq_len=max_seq_len,
             dropout=dropout,
-            d_post_diag=d_post_diag,
+            d_post_diag=self.d_post_diag,
             polluted_experience_attn=polluted_experience_attn,
             use_multimodal=use_multimodal,
         )
@@ -220,8 +243,8 @@ class ACDMMKTv3(nn.Module):
                 "v_sol": zeros_vec,
                 "lambda_q": zeros_vec,
                 "bar_lambda_q": zeros_bar,
-                "beta_txt_q": torch.zeros((M, 128), device=q_ids.device),
-                "beta_txt_s": torch.zeros((M, 160), device=q_ids.device),
+                "beta_txt_q": torch.zeros((M, self.acd_E_txt_q.size(1)), device=q_ids.device),
+                "beta_txt_s": torch.zeros((M, self.acd_E_txt_s.size(1)), device=q_ids.device),
                 "A_cross_q": None,
                 "u_txt_q": zeros_vec,
                 "u_cross_q": zeros_vec,
@@ -376,7 +399,12 @@ class ACDMMKTv3(nn.Module):
             if mu_concept_prior is not None:
                 prior_tensor = mu_concept_prior.to(all_q_ids.device)
             else:
-                prior_tensor = torch.full((self.num_questions,), -1.37, device=all_q_ids.device, dtype=torch.float32)
+                prior_tensor = torch.full(
+                    (self.num_questions,),
+                    self.default_mu_concept,
+                    device=all_q_ids.device,
+                    dtype=torch.float32,
+                )
 
             self.cached_item_properties = self.forward_items(
                 q_ids=all_q_ids,
@@ -423,7 +451,7 @@ class ACDMMKTv3(nn.Module):
                 # If sequence batch has mu_concept, we can extract from it or lookup
                 batch_mu_concept = batch["mu_concept"]  # [B, L]
             else:
-                batch_mu_concept = torch.full((B, L), -1.37, device=device, dtype=torch.float32)
+                batch_mu_concept = torch.full((B, L), self.default_mu_concept, device=device, dtype=torch.float32)
         else:
             batch_mu_concept = mu_concept_prior[q_seq].to(device)
 
@@ -478,8 +506,8 @@ class ACDMMKTv3(nn.Module):
             if mu_concept_prior is not None:
                 uniq_prior = mu_concept_prior[unique_q].to(device)
             else:
-                # Fallback to mean batch prior for active questions
-                uniq_prior = torch.full((len(unique_q),), -1.37, device=device, dtype=torch.float32)
+                # Fallback to dataset-mean prior for active questions
+                uniq_prior = torch.full((len(unique_q),), self.default_mu_concept, device=device, dtype=torch.float32)
 
             uniq_clean_masks = self.bank_modality_masks[unique_q]
 
@@ -580,6 +608,11 @@ class ACDMMKTv3(nn.Module):
             norm_lag = (norm_delta_t_lag if norm_delta_t_lag is not None else torch.zeros_like(r_seq, dtype=torch.float32)).unsqueeze(-1)
             q_fmt = self.bank_static_ctx[q_seq, 0:1]  # question format flag from static context
             v_post_diag = torch.cat([r_seq.unsqueeze(-1).float(), batch_flag.float(), norm_lag.float(), q_fmt.float()], dim=-1)
+        elif self.post_diag_mode == "diagnostic":
+            if "post_diag_vec" in batch and batch["post_diag_vec"] is not None:
+                v_post_diag = batch["post_diag_vec"].to(device=device, dtype=torch.float32)
+            else:
+                v_post_diag = torch.zeros((B, L, self.d_post_diag), device=device, dtype=torch.float32)
 
         h_seq, tilde_x_seq, alpha_ret = self.sub3(
             x_seq=x_seq,
@@ -666,7 +699,7 @@ class ACDMMKTv3(nn.Module):
         single_prior = (
             mu_concept_prior[single_q]
             if mu_concept_prior is not None
-            else torch.tensor([-1.37], device=device)
+            else torch.tensor([self.default_mu_concept], device=device)
         )
 
         if "modality_masks" in batch and batch["modality_masks"] is not None:

@@ -44,6 +44,7 @@ class TextGuidedCrossAligner(nn.Module):
         use_visual: bool = True,
         use_solution: bool = True,
         use_multimodal: bool = True,
+        has_solution_images: bool = True,
     ):
         """
         Initialize TextGuidedCrossAligner.
@@ -57,12 +58,15 @@ class TextGuidedCrossAligner(nn.Module):
             use_visual: Whether visual alignment is enabled (Ablation 3 flag).
             use_solution: Whether solution stream is enabled (Ablation 2 flag).
             use_multimodal: Master switch for multimodal stream (Ablation 1 flag).
+            has_solution_images: Whether any item in the active dataset has a solution diagram
+                (prevents allocating unused solution-image parameters when m_img^s is zero everywhere).
         """
         super().__init__()
         self.d_model = d_model
         self.use_visual = use_visual
         self.use_solution = use_solution
         self.use_multimodal = use_multimodal
+        self.has_solution_images = has_solution_images
 
         if not self.use_multimodal:
             # Ablation 1: pure KC interaction, no Subsystem 1 parameters instantiated
@@ -99,7 +103,7 @@ class TextGuidedCrossAligner(nn.Module):
             self.norm_img = nn.LayerNorm(d_model)
 
             # Solution image projection (optional global visual supplement)
-            if self.use_solution:
+            if self.use_solution and self.has_solution_images:
                 self.proj_img_sol = nn.Linear(d_raw_img, d_model)
                 self.norm_img_sol = nn.LayerNorm(d_model)
                 self.gate_sol_img = nn.Linear(2 * d_model, d_model)
