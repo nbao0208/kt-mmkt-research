@@ -280,19 +280,36 @@ class TestContext:
 # ---------------------------------------------------------------------------------------------
 class PyKTBaselineRunner:
     """
-    Runs the question-level anti-leakage inference of `PyKTEvaluator` on the ORIGINAL test.csv.
+    Runs the question-level anti-leakage inference of `PyKTEvaluator` on kc_level test CSVs
+    across XES3G5M or Eedi (unified, public, private).
     """
 
-    def __init__(self, raw_root_dir: str, device: torch.device, logger=None):
+    def __init__(
+        self,
+        raw_root_dir: str,
+        device: torch.device,
+        logger=None,
+        dataset_key: str = "xes3g5m",
+        test_split: str = "unified",
+        test_csv_path: Optional[str] = None,
+        processed_dir: Optional[str] = None,
+        expected_eval_count: Optional[int] = None,
+    ):
         # Imported lazily: pykt_dataset patches torch.cuda tensor aliases at import time
         from src.evaluation.pykt_evaluator import PyKTEvaluator
 
         self.device = device
         self.logger = logger or get_logger("PyKTBaselineRunner")
+        resolved_test_csv = test_csv_path
+        if resolved_test_csv is None and dataset_key == "xes3g5m":
+            resolved_test_csv = os.path.join(raw_root_dir, "kc_level", "test.csv")
         self.evaluator = PyKTEvaluator(
             raw_data_dir=raw_root_dir,
-            test_csv_path=os.path.join(raw_root_dir, "kc_level", "test.csv"),
-            processed_dir=None,
+            test_csv_path=resolved_test_csv,
+            processed_dir=processed_dir,
+            dataset_key=dataset_key,
+            test_split=test_split,
+            expected_eval_count=expected_eval_count,
             device=device,
             logger=self.logger,
         )

@@ -66,7 +66,7 @@ from src.utils.seed import set_seed
 from scripts.run_5fold_acd_mmkt_v3 import resolve_ablation_preset, load_yaml_config
 
 
-# Baseline model metadata for publication tables
+# Baseline model metadata for publication tables (fallback parameter counts apply to XES3G5M only)
 BASELINE_METADATA: Dict[str, Dict[str, Any]] = {
     "DKT": {"params": 303490, "modality": "Pure KC (RNN)"},
     "DKVMN": {"params": 265856, "modality": "Pure KC (Memory Net)"},
@@ -74,6 +74,15 @@ BASELINE_METADATA: Dict[str, Dict[str, Any]] = {
     "MG-MMKT": {"params": 1931273, "modality": "C_tau, T_q, I_q, T_s, I_s"},
     "MG-MMKTv2": {"params": 2145824, "modality": "C_tau, T_q, I_q, T_s, I_s"},
 }
+
+
+def count_checkpoint_params(ckpt_path: str) -> int:
+    """Count total parameter elements stored in a checkpoint's model_state_dict."""
+    if not os.path.exists(ckpt_path):
+        return 0
+    ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+    state_dict = ckpt.get("model_state_dict", {})
+    return int(sum(t.numel() for t in state_dict.values()))
 
 
 def normalize_baseline_name(b: str) -> str:
@@ -1007,8 +1016,11 @@ def generate_master_ablation_markdown_report(
         if b_name in baseline_metrics:
             bm = baseline_metrics[b_name]
             b_info = BASELINE_METADATA.get(b_name, {"params": 0, "modality": "N/A"})
+            b_params = bm.get("params") or (b_info["params"] if ds_name.startswith("XES3G5M") else 0)
+            p_str = f"{b_params:,}" if b_params > 0 else "--"
+            role_tag = "pyKT Baseline" if b_name in ("DKT", "DKVMN", "SAKT") else "MMKT Baseline"
             lines.append(
-                f"| *{b_name} (pyKT Baseline)* | {b_info['modality']} | {b_info['params']:,} | {bm['mean_auc']:.4f} ± {bm['std_auc']:.4f} | {bm['ens_auc']:.4f} | {bm['ens_acc']:.4f} | {bm['rmse']:.4f} | {bm['brier']:.4f} | {bm['ece']:.4f} | {bm.get('macro_auc', 0.0):.4f} |"
+                f"| *{b_name} ({role_tag})* | {b_info['modality']} | {p_str} | {bm['mean_auc']:.4f} ± {bm['std_auc']:.4f} | {bm['ens_auc']:.4f} | {bm['ens_acc']:.4f} | {bm['rmse']:.4f} | {bm['brier']:.4f} | {bm['ece']:.4f} | {bm.get('macro_auc', 0.0):.4f} |"
             )
 
     lines.extend([
@@ -1137,19 +1149,24 @@ def generate_master_ablation_markdown_report(
         ("Full vs Ablation 3 (`w/o Visual`)", "Full ACD-MMKTv3", "Ablation 3 (w/o Visual)", "3"),
         ("Full vs Ablation 2 (`w/o Solution`)", "Full ACD-MMKTv3", "Ablation 2 (w/o Solution)", "2"),
         ("Full vs Ablation 1 (`Pure KC`)", "Full ACD-MMKTv3", "Ablation 1 (Pure KC)", "1"),
-        ("Ablation 1 (`Pure KC`) vs DKT", "Ablation 1 (Pure KC)", "DKT", "1"),
-        ("Ablation 1 (`Pure KC`) vs DKVMN", "Ablation 1 (Pure KC)", "DKVMN", "1"),
-        ("Ablation 1 (`Pure KC`) vs SAKT", "Ablation 1 (Pure KC)", "SAKT", "1"),
-        ("Ablation 1 (`Pure KC`) vs MG-MMKT", "Ablation 1 (Pure KC)", "MG-MMKT", "1"),
-        ("Ablation 1 (`Pure KC`) vs MG-MMKTv2", "Ablation 1 (Pure KC)", "MG-MMKTv2", "1"),
     ]
+    for b_name in ["DKT", "DKVMN", "SAKT"]:
+        if b_name in baseline_metrics:
+            comparisons.append(
+                (f"Full ACD-MMKTv3 vs {b_name}", "Full ACD-MMKTv3", b_name, "full")
+            )
+    for b_name in ["DKT", "DKVMN", "SAKT", "MG-MMKT", "MG-MMKTv2"]:
+        if b_name in baseline_metrics:
+            comparisons.append(
+                (f"Ablation 1 (`Pure KC`) vs {b_name}", "Ablation 1 (Pure KC)", b_name, "1")
+            )
 
     for label, m_a, m_b, ab_key in comparisons:
         if ab_key not in stat_tests:
             continue
 
-        # Correct lookup key: if m_a is Full, lookup 'Full ACD-MMKTv3' from ablation's tests dict
-        lookup_target = "Full ACD-MMKTv3" if m_a.startswith("Full") else m_b
+        # Correct lookup key: if m_a is Full and m_b is an Ablation, lookup 'Full ACD-MMKTv3' from ablation's tests dict
+        lookup_target = "Full ACD-MMKTv3" if (m_a.startswith("Full") and ab_key != "full") else m_b
         st = stat_tests.get(ab_key, {}).get(lookup_target, {})
 
         delong_p, rev = lookup_pairwise(delong_res, m_a, m_b)
@@ -1172,7 +1189,12 @@ def generate_master_ablation_markdown_report(
             ci_l, ci_h = -ci_h, -ci_l
         ci_str = f"[{ci_l:+.4f}, {ci_h:+.4f}]"
 
-        conclusion = "**Ý nghĩa ($p < 0.001$)**" if p_adj < 0.001 else "Tương đương (n.s.)"
+        if p_adj < 0.001:
+            conclusion = "**Ý nghĩa ($p < 0.001$)**"
+        elif p_adj < 0.05:
+            conclusion = "**Ý nghĩa ($p < 0.05$)**"
+        else:
+            conclusion = "Tương đương (n.s.)"
         lines.append(f"| **{label}** | {p_t} | {p_w} | {z_str} | {p_adj_str} | {ci_str} | {conclusion} |")
 
     lines.extend([
@@ -1279,16 +1301,24 @@ def main():
         b_name = normalize_baseline_name(b)
         b_preds = []
         b_aucs = []
+        b_params = 0
         for f in args.folds:
             if b in ["dkt", "dkvmn", "sakt", "mg_mmkt"]:
-                p_file = os.path.join(pipeline.checkpoints_base, f"{b}_fold{f}", "test_preds.npy")
+                p_file = os.path.join(pipeline.checkpoints_base, f"{b}_fold{f}", f"test_preds{pipeline.split_tag}.npy")
+                ckpt_file = os.path.join(pipeline.checkpoints_base, f"{b}_fold{f}", "best_model.pt")
             else:
-                p_file = os.path.join(pipeline.checkpoints_base, "v2_full_5fold", f"mg_mmkt_v2_fold{f}", "test_preds.npy")
+                p_file = os.path.join(pipeline.checkpoints_base, "v2_full_5fold", f"mg_mmkt_v2_fold{f}", f"test_preds{pipeline.split_tag}.npy")
+                ckpt_file = os.path.join(pipeline.checkpoints_base, "v2_full_5fold", f"mg_mmkt_v2_fold{f}", "best_model.pt")
+            if b_params == 0 and os.path.exists(ckpt_file):
+                b_params = count_checkpoint_params(ckpt_file)
             if os.path.exists(p_file):
                 arr = np.load(p_file).astype(np.float64)
                 if len(arr) == len(pipeline.targets):
                     b_preds.append(arr)
                     b_aucs.append(float(compute_binary_metrics(arr, pipeline.targets)["auc"]))
+
+        if b_params == 0 and pipeline.dataset_key == "xes3g5m":
+            b_params = BASELINE_METADATA.get(b_name, {}).get("params", 0)
 
         if len(b_preds) == len(args.folds):
             ens_p = np.mean(b_preds, axis=0)
@@ -1297,14 +1327,18 @@ def main():
             b_m = compute_binary_metrics(ens_p, pipeline.targets)
             b_macro = student_macro_auc(ens_p, pipeline.targets, pipeline.ctx.student_index)
             baseline_metrics[b_name] = {
+                "params": int(b_params),
+                "fold_aucs": [float(x) for x in b_aucs],
                 "ens_auc": b_m["auc"],
                 "ens_acc": b_m["acc"],
                 "rmse": b_m["rmse"],
                 "brier": b_m["brier"],
+                "log_loss": b_m["log_loss"],
                 "ece": b_m["ece"],
                 "macro_auc": b_macro["macro_auc"],
                 "mean_auc": float(np.mean(b_aucs)),
                 "std_auc": float(np.std(b_aucs)),
+                "stratified_metrics": pipeline.compute_stratified_evaluation(ens_p),
             }
 
     # 2. Execute the Requested Modality Ablation Studies
@@ -1422,8 +1456,30 @@ def main():
     point_estimates = {k: compute_binary_metrics(v, pipeline.targets) for k, v in all_models_dict.items()}
     boot_summary = boot.summarize(boot_reps, point_estimates, alpha=0.05)
 
-    # 5. Compile Statistical Tests for Each Ablation
+    # 5. Compile Statistical Tests for Full Model and Each Ablation
     full_fold_aucs = pipeline.full_fold_aucs
+
+    full_tests: Dict[str, Any] = {}
+    for b_name in baseline_metrics.keys():
+        if b_name in baseline_fold_aucs and len(full_fold_aucs) == len(baseline_fold_aucs[b_name]):
+            p_fold_b = paired_fold_tests(full_fold_aucs, baseline_fold_aucs[b_name])
+            delong_b, _ = lookup_pairwise(delong_res, "Full ACD-MMKTv3", b_name)
+            boot_b, rev_bb = lookup_pairwise(boot_summary.get("pairwise", {}), "Full ACD-MMKTv3", b_name)
+            b_ci_low = boot_b.get("delta_auc_ci_low", boot_b.get("ci_low", 0.0))
+            b_ci_high = boot_b.get("delta_auc_ci_high", boot_b.get("ci_high", 0.0))
+            if rev_bb:
+                b_ci_low, b_ci_high = -b_ci_high, -b_ci_low
+            full_tests[b_name] = {
+                "paired_t_stat": p_fold_b["t_statistic"],
+                "paired_t_pval": p_fold_b["p_value_ttest"],
+                "wilcoxon_stat": p_fold_b["wilcoxon_stat"],
+                "wilcoxon_pval": p_fold_b["p_value_wilcoxon"],
+                "delong_p_adjusted": delong_b.get("p_value_holm", delong_b.get("p_value", 1.0)),
+                "ci_low": b_ci_low,
+                "ci_high": b_ci_high,
+            }
+    if full_tests:
+        stat_tests_per_ablation["full"] = full_tests
 
     for ab_key, res in ablation_results.items():
         if res["ensemble_preds"] is None or len(res["single_fold_metrics"]) == 0:
@@ -1568,6 +1624,8 @@ def main():
             }
             for k, res in ablation_results.items()
         },
+        "baselines": baseline_metrics,
+        "full_vs_baselines_statistical_tests": stat_tests_per_ablation.get("full", {}),
         "delong_tests_overall": delong_res,
         "delong_tests_visual_slice": vis_delong_res,
         "cluster_bootstrap_95ci": boot_summary,

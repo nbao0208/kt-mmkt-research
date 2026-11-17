@@ -1,0 +1,25 @@
+# Dataset Configuration for pyKT Baselines on Eedi NeurIPS 2020 (Task 3 & 4)
+dataset_name: "Eedi"
+raw_root_dir: "data/raw/Eedi NeurIPS 2020/data_extracted/data"
+raw_data_dir: "data/processed/Eedi/pykt_kc_level"
+processed_dir: "data/processed/Eedi"
+splits_dir: "data/splits/Eedi"
+train_valid_file: "train_valid_sequences.csv"
+test_file: "test_unified.csv"
+test_files:
+  unified: "test_unified.csv"
+  public: "test_public.csv"
+  private: "test_private.csv"
+expected_eval_counts:
+  unified: 124960
+  public: 74276
+  private: 50684
+expected_test_students:
+  unified: 1230
+  public: 615
+  private: 615
+num_c: 57
+num_questions: 948
+max_seq_len: 200
+test_stride: 100
+folds: [0, 1, 2, 3, 4]

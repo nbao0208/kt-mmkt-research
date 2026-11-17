@@ -1,0 +1,18 @@
+# Training & Optimization Configuration for pyKT Baselines (DKT, DKVMN, SAKT) on Eedi
+dataset_name: "Eedi"
+batch_size: 128
+test_batch_size: 256
+num_workers: 0
+num_epochs: 50
+lr: 1.0e-3
+weight_decay: 0.0
+max_grad_norm: 1.0
+patience: 10
+seed: 42
+device: "auto"
+test_split: "unified"
+save_dir: "outputs/checkpoints/eedi"
+checkpoint_dir: "outputs/checkpoints/eedi"
+log_dir: "outputs/logs/eedi"
+report_dir: "outputs/reports/eedi"
+output_report_dir: "outputs/reports/eedi"

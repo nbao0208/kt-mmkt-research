@@ -163,7 +163,10 @@ def parse_args():
     return parser.parse_args()
 
 
-def load_real_benchmarks_from_reports(base_reports_dir: str = "outputs/reports") -> Dict[str, Dict[str, Any]]:
+def load_real_benchmarks_from_reports(
+    base_reports_dir: str = "outputs/reports",
+    split_tag: str = "",
+) -> Dict[str, Dict[str, Any]]:
     """
     Load empirical 5-fold evaluation AUCs from real benchmark reports on disk.
     Strictly avoids hardcoded mockup/dummy values. Any baseline without existing
@@ -182,7 +185,7 @@ def load_real_benchmarks_from_reports(base_reports_dir: str = "outputs/reports")
     benchmarks: Dict[str, Dict[str, Any]] = {}
 
     # 1. pyKT baselines (DKT, DKVMN, SAKT)
-    pykt_path = os.path.join(base_reports_dir, "pykt_baselines_comprehensive_evaluation.json")
+    pykt_path = os.path.join(base_reports_dir, f"pykt_baselines_comprehensive_evaluation{split_tag}.json")
     if os.path.exists(pykt_path):
         try:
             with open(pykt_path, "r", encoding="utf-8") as f:
@@ -251,7 +254,9 @@ def load_real_benchmarks_from_reports(base_reports_dir: str = "outputs/reports")
             print(f"[Warning] Failed to parse MG-MMKT v2 report {mg_v2_path}: {e}")
 
     # 4. Full ACD-MMKTv3
-    acd_v3_full_path = os.path.join(base_reports_dir, "v3_full_5fold", "acd_mmkt_v3_5fold_report.json")
+    acd_v3_full_path = os.path.join(base_reports_dir, f"acd_mmkt_v3_5fold_report{split_tag}.json")
+    if not os.path.exists(acd_v3_full_path):
+        acd_v3_full_path = os.path.join(base_reports_dir, "v3_full_5fold", "acd_mmkt_v3_5fold_report.json")
     if os.path.exists(acd_v3_full_path):
         try:
             with open(acd_v3_full_path, "r", encoding="utf-8") as f:
@@ -746,7 +751,11 @@ def main():
     logger.info("=" * 60)
     logger.info("=== BENCHMARK COMPARISON & PAIRED STATISTICAL TESTING ===")
 
-    benchmarks = load_real_benchmarks_from_reports(base_reports_dir=args.output_report_dir)
+    report_split_tag = resolve_split_tag(dataset_key, args.test_split)
+    benchmarks = load_real_benchmarks_from_reports(
+        base_reports_dir=args.output_report_dir,
+        split_tag=report_split_tag,
+    )
 
     stat_tests = {}
     for base_name, base_info in benchmarks.items():

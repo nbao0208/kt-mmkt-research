@@ -99,25 +99,27 @@ def get_pykt_dataloaders(
 
 def load_test_grouped_data(
     test_csv_path: str = "data/raw/XES3G5M/kc_level/test.csv",
+    expected_eval_count: Optional[int] = 1099197,
 ) -> List[Dict[str, Any]]:
     """
-    Load test.csv and group interactions by question for each student.
+    Load a pyKT kc_level test CSV and group interactions by question for each student.
     
-    In kc_level/test.csv, questions requiring multiple skills are unrolled into
+    In kc_level test CSVs, questions requiring multiple skills are unrolled into
     consecutive steps with `is_repeat == 0` for the first skill and `is_repeat == 1`
     for subsequent skills belonging to the same question.
     
     This function parses each student trajectory and groups skills by question.
     The first question (t = 0) has no prior history and is skipped from evaluation,
-    yielding exactly 1,099,197 evaluated question interactions across all 3,613 students.
+    yielding e.g. 1,099,197 interactions on XES3G5M or 124,960 / 74,276 / 50,684 on Eedi.
 
     Args:
-        test_csv_path: Path to kc_level/test.csv.
+        test_csv_path: Path to kc_level test CSV.
+        expected_eval_count: Expected number of evaluated interactions (None to skip assertion).
 
     Returns:
         List of student dictionaries, each containing:
             - 'uid': Student ID.
-            - 'questions': List of question interaction tuples (q_id, concept_list, response).
+            - 'all_questions': List of question interaction tuples.
             - 'eval_questions': Evaluated question tuples starting from index 1 (t > 0).
     """
     if not os.path.exists(test_csv_path):
@@ -171,9 +173,10 @@ def load_test_grouped_data(
             "eval_questions": eval_q,
         })
 
-    assert total_eval_interactions == 1099197, (
-        f"Expected exactly 1,099,197 evaluated interactions, got {total_eval_interactions}!"
-    )
+    if expected_eval_count is not None:
+        assert total_eval_interactions == expected_eval_count, (
+            f"Expected exactly {expected_eval_count:,} evaluated interactions, got {total_eval_interactions:,}!"
+        )
     return students
 
 
@@ -181,30 +184,112 @@ def load_stratification_metadata(
     raw_data_dir: str = "data/raw/XES3G5M",
     test_grouped_students: Optional[List[Dict[str, Any]]] = None,
     processed_dir: Optional[str] = None,
+    dataset_key: str = "xes3g5m",
+    test_split: str = "unified",
+    test_csv_path: Optional[str] = None,
+    expected_eval_count: Optional[int] = None,
+    test_stride: int = 100,
+    train_valid_csv_path: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
-    Extract stratification metadata aligned with the 1,099,197 evaluated test interactions,
-    sourced directly from raw XES3G5M data without requiring MMKT processed tensors.
+    Extract stratification metadata aligned with evaluated test interactions.
+
+    Supports both:
+    - 'xes3g5m': sourced from raw XES3G5M kc_level CSVs and metadata/questions.json (1,099,197 interactions).
+    - 'eedi': sourced from EediTestContext + non-overlapping Eedi pykt_kc_level/train_valid_sequences.csv
+      with strict 1-to-1 element-wise verification against EediTestContext (124,960 / 74,276 / 50,684).
 
     Provides:
-    - 'targets': np.ndarray of ground truth binary labels (length 1,099,197).
-    - 'q_ids': np.ndarray of evaluated question IDs (length 1,099,197).
-    - 'm_img_q': np.ndarray of question image indicators (length 1,099,197).
-    - 'prev_m_img_s': np.ndarray of prior step solution image indicators (length 1,099,197).
-    - 'remedial_mask': np.ndarray of bool indicating response at tau-1 == 0 (length 1,099,197).
+    - 'targets': np.ndarray of ground truth binary labels.
+    - 'q_ids': np.ndarray of evaluated question IDs.
+    - 'm_img_q': np.ndarray of question image indicators.
+    - 'prev_m_img_s': np.ndarray of prior step solution image indicators.
+    - 'remedial_mask': np.ndarray of bool indicating response at tau-1 == 0.
     - 'train_question_counts': Dict mapping question ID to occurrence count in training set.
-
-    Args:
-        raw_data_dir: Directory containing raw XES3G5M data (kc_level/, metadata/).
-        test_grouped_students: Optional pre-loaded grouped student data.
-        processed_dir: Optional legacy fallback directory for processed MMKT tensors.
-
-    Returns:
-        Dictionary of aligned stratification arrays and count dictionary.
     """
+    ds_key = dataset_key.strip().lower()
+    if ds_key == "eedi":
+        from src.evaluation.eedi_test_context import EediTestContext, EXPECTED_EEDI_EVAL_COUNTS
+
+        split_key = test_split.strip().lower()
+        exp_count = expected_eval_count if expected_eval_count is not None else EXPECTED_EEDI_EVAL_COUNTS.get(split_key)
+        proc_dir = processed_dir or "data/processed/Eedi"
+        if test_grouped_students is None:
+            resolved_test_csv = test_csv_path or os.path.join(
+                raw_data_dir, f"test_{split_key}.csv"
+            )
+            if not os.path.exists(resolved_test_csv):
+                resolved_test_csv = os.path.join(proc_dir, "pykt_kc_level", f"test_{split_key}.csv")
+            test_grouped_students = load_test_grouped_data(
+                resolved_test_csv, expected_eval_count=exp_count
+            )
+
+        targets_list: List[int] = []
+        q_ids_list: List[int] = []
+        remedial_mask_list: List[bool] = []
+        for s in test_grouped_students:
+            all_q = s["all_questions"]
+            for t in range(1, len(all_q)):
+                targets_list.append(int(all_q[t]["response"]))
+                q_ids_list.append(int(all_q[t]["q_id"]))
+                remedial_mask_list.append(int(all_q[t - 1]["response"]) == 0)
+
+        targets_arr = np.asarray(targets_list, dtype=np.int64)
+        q_ids_arr = np.asarray(q_ids_list, dtype=np.int64)
+        remedial_arr = np.asarray(remedial_mask_list, dtype=bool)
+
+        ctx = EediTestContext(processed_dir=proc_dir, test_split=split_key, test_stride=test_stride)
+        assert np.array_equal(targets_arr, ctx.targets), (
+            f"Eedi pyKT targets mismatch against EediTestContext on split '{split_key}'!"
+        )
+        assert np.array_equal(q_ids_arr, ctx.q_ids), (
+            f"Eedi pyKT q_ids mismatch against EediTestContext on split '{split_key}'!"
+        )
+
+        strata_masks = ctx.strata_masks()
+        m_img_q_arr = strata_masks["q_stem_image"].astype(np.float32)
+        # Eedi Task 3 & 4 has zero authentic solution images across all 948 items
+        prev_m_img_s_arr = np.zeros(len(targets_arr), dtype=np.float32)
+
+        # Compute non-overlapping training question counts (never count overlapping strided windows)
+        train_counts: Counter = Counter()
+        tv_csv = train_valid_csv_path or os.path.join(raw_data_dir, "train_valid_sequences.csv")
+        if not os.path.exists(tv_csv):
+            tv_csv = os.path.join(proc_dir, "pykt_kc_level", "train_valid_sequences.csv")
+        if os.path.exists(tv_csv):
+            df_train = pd.read_csv(tv_csv)
+            for _, row in df_train.iterrows():
+                qs = [int(x) for x in row["questions"].split(",")]
+                repeats = [int(x) for x in row["is_repeat"].split(",")]
+                for q, rep in zip(qs, repeats):
+                    if q != -1 and rep == 0:
+                        train_counts[q] += 1
+        else:
+            aux_path = os.path.join(proc_dir, "acd_v3_aux_metadata.pt")
+            if os.path.exists(aux_path):
+                aux = torch.load(aux_path, map_location="cpu", weights_only=False)
+                q_cnt_tensor = aux["question_train_counts"]
+                for qid, cnt in enumerate(q_cnt_tensor.tolist()):
+                    if cnt > 0:
+                        train_counts[qid] = int(cnt)
+
+        return {
+            "targets": targets_arr,
+            "q_ids": q_ids_arr,
+            "m_img_q": m_img_q_arr,
+            "prev_m_img_s": prev_m_img_s_arr,
+            "remedial_mask": remedial_arr,
+            "train_question_counts": dict(train_counts),
+            "eedi_context": ctx,
+            "strata_masks": strata_masks,
+        }
+
     if test_grouped_students is None:
-        test_csv_path = os.path.join(raw_data_dir, "kc_level", "test.csv")
-        test_grouped_students = load_test_grouped_data(test_csv_path)
+        resolved_test_csv = test_csv_path or os.path.join(raw_data_dir, "kc_level", "test.csv")
+        exp_count = expected_eval_count if expected_eval_count is not None else 1099197
+        test_grouped_students = load_test_grouped_data(
+            resolved_test_csv, expected_eval_count=exp_count
+        )
 
     # 1. Extract question and solution image indicators directly from raw metadata/questions.json
     q_meta_path = os.path.join(raw_data_dir, "metadata", "questions.json")

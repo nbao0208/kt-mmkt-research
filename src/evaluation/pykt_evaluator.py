@@ -19,13 +19,14 @@ from sklearn.metrics import roc_auc_score, accuracy_score
 from src.models.baselines.pykt_models import init_pykt_baseline, sync_pykt_device
 from src.data.pykt_dataset import load_test_grouped_data, load_stratification_metadata
 from src.evaluation.metrics import calculate_metrics, multimodal_stratified_evaluation
+from src.evaluation.benchmark_statistics import compute_binary_metrics, student_macro_auc
 from src.utils.logger import get_logger
 
 
 class PyKTEvaluator:
     """
     Evaluator performing unrolled, anti-leakage question-level inference
-    and multimodal comparative analysis for pyKT models.
+    and multimodal comparative analysis for pyKT models across XES3G5M and Eedi.
     """
 
     def __init__(
@@ -33,6 +34,11 @@ class PyKTEvaluator:
         raw_data_dir: str = "data/raw/XES3G5M",
         test_csv_path: Optional[str] = None,
         processed_dir: Optional[str] = None,
+        dataset_key: str = "xes3g5m",
+        test_split: str = "unified",
+        expected_eval_count: Optional[int] = None,
+        test_stride: int = 100,
+        train_valid_csv_path: Optional[str] = None,
         device: Optional[torch.device] = None,
         logger: Optional[Any] = None,
     ):
@@ -40,16 +46,41 @@ class PyKTEvaluator:
         Initialize the evaluator.
 
         Args:
-            raw_data_dir: Directory containing raw XES3G5M files (kc_level/, metadata/).
-            test_csv_path: Optional path to kc_level/test.csv.
-            processed_dir: Optional legacy fallback directory for processed MMKT tensors.
+            raw_data_dir: Directory containing raw kc_level/metadata (XES3G5M) or pykt_kc_level (Eedi).
+            test_csv_path: Optional explicit path to kc_level test CSV.
+            processed_dir: Directory containing processed MMKT tensors (required for EediTestContext).
+            dataset_key: Canonical dataset identifier ('xes3g5m' or 'eedi').
+            test_split: Eedi evaluation split ('unified', 'public', or 'private').
+            expected_eval_count: Expected number of evaluated question-level interactions.
+            test_stride: Context-preserving stride used by EediTestContext (default: 100).
+            train_valid_csv_path: Optional explicit path to train_valid_sequences.csv.
             device: Target evaluation device.
             logger: Custom logger instance.
         """
         self.raw_data_dir = raw_data_dir
-        self.test_csv_path = test_csv_path or os.path.join(raw_data_dir, "kc_level", "test.csv")
-        self.processed_dir = processed_dir
+        self.dataset_key = dataset_key.strip().lower()
+        self.test_split = test_split.strip().lower()
+        self.processed_dir = processed_dir or ("data/processed/Eedi" if self.dataset_key == "eedi" else None)
+        self.test_stride = test_stride
         self.logger = logger or get_logger("PyKTEvaluator")
+
+        if self.dataset_key == "eedi":
+            from src.evaluation.eedi_test_context import EXPECTED_EEDI_EVAL_COUNTS
+
+            self.expected_eval_count = (
+                int(expected_eval_count)
+                if expected_eval_count is not None
+                else int(EXPECTED_EEDI_EVAL_COUNTS[self.test_split])
+            )
+            default_test_csv = os.path.join(raw_data_dir, f"test_{self.test_split}.csv")
+            if not os.path.exists(default_test_csv):
+                default_test_csv = os.path.join(
+                    self.processed_dir, "pykt_kc_level", f"test_{self.test_split}.csv"
+                )
+            self.test_csv_path = test_csv_path or default_test_csv
+        else:
+            self.expected_eval_count = int(expected_eval_count) if expected_eval_count is not None else 1099197
+            self.test_csv_path = test_csv_path or os.path.join(raw_data_dir, "kc_level", "test.csv")
 
         if device is None:
             if torch.cuda.is_available():
@@ -64,18 +95,33 @@ class PyKTEvaluator:
         sync_pykt_device(self.device)
 
         # Preload student grouped test sequences and stratification metadata
-        self.logger.info("Loading test student sequences and stratification metadata from raw XES3G5M...")
-        self.test_students = load_test_grouped_data(self.test_csv_path)
+        self.logger.info(
+            f"Loading test student sequences and stratification metadata for {self.dataset_key.upper()} "
+            f"(split={self.test_split}, path={self.test_csv_path})..."
+        )
+        self.test_students = load_test_grouped_data(
+            self.test_csv_path,
+            expected_eval_count=self.expected_eval_count,
+        )
         self.strat_meta = load_stratification_metadata(
             raw_data_dir=self.raw_data_dir,
             test_grouped_students=self.test_students,
             processed_dir=self.processed_dir,
+            dataset_key=self.dataset_key,
+            test_split=self.test_split,
+            test_csv_path=self.test_csv_path,
+            expected_eval_count=self.expected_eval_count,
+            test_stride=self.test_stride,
+            train_valid_csv_path=train_valid_csv_path,
         )
+        self.eedi_ctx = self.strat_meta.get("eedi_context")
         self.ground_truth_targets = self.strat_meta["targets"]
-        assert len(self.ground_truth_targets) == 1099197, (
-            f"Expected exactly 1,099,197 targets, got {len(self.ground_truth_targets)}"
+        assert len(self.ground_truth_targets) == self.expected_eval_count, (
+            f"Expected exactly {self.expected_eval_count:,} targets, got {len(self.ground_truth_targets):,}"
         )
-        self.logger.info(f"Loaded {len(self.test_students)} students ({len(self.ground_truth_targets)} interactions).")
+        self.logger.info(
+            f"Loaded {len(self.test_students)} students ({len(self.ground_truth_targets):,} interactions)."
+        )
 
     def predict_dkt_all(self, model: nn.Module, batch_size: int = 1024) -> np.ndarray:
         """
@@ -436,8 +482,8 @@ class PyKTEvaluator:
         else:
             raise ValueError(f"Unsupported model name: {model_name}")
 
-        assert len(preds_arr) == 1099197, (
-            f"Prediction length mismatch: expected 1,099,197, got {len(preds_arr)}"
+        assert len(preds_arr) == self.expected_eval_count, (
+            f"Prediction length mismatch: expected {self.expected_eval_count:,}, got {len(preds_arr):,}"
         )
         return preds_arr
 
@@ -452,12 +498,12 @@ class PyKTEvaluator:
             checkpoint_path: Path to best_model.pt checkpoint file.
 
         Returns:
-            Tuple of (predictions array [1099197], evaluation results dict).
+            Tuple of (predictions array [N_eval], evaluation results dict).
         """
         if not os.path.exists(checkpoint_path):
             raise FileNotFoundError(f"Checkpoint not found at: {checkpoint_path}")
 
-        ckpt = torch.load(checkpoint_path, map_location=self.device)
+        ckpt = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
         model_name = ckpt["model_name"]
         model_config = ckpt["model_config"]
         fold = ckpt.get("fold", 0)
@@ -468,12 +514,14 @@ class PyKTEvaluator:
             device=self.device,
         )
         model.load_state_dict(ckpt["model_state_dict"])
+        num_params = int(sum(p.numel() for p in model.parameters() if p.requires_grad))
 
         preds = self.predict_model(model, model_name)
         metrics = self.compute_all_metrics(preds)
         metrics["model_name"] = model_name
         metrics["fold"] = fold
         metrics["val_auc"] = ckpt.get("val_auc", 0.0)
+        metrics["num_parameters"] = num_params
 
         return preds, metrics
 
@@ -482,10 +530,11 @@ class PyKTEvaluator:
         preds: np.ndarray,
     ) -> Dict[str, Any]:
         """
-        Compute global, multimodal, remedial, and cold-start stratified metrics.
+        Compute global, multimodal, remedial, cold-start, and (on Eedi) comprehensive
+        calibration + pedagogical stratified metrics.
 
         Args:
-            preds: Array of predicted probabilities of length 1,099,197.
+            preds: Array of predicted probabilities aligned with ground_truth_targets.
 
         Returns:
             Nested dictionary of all evaluation metrics.
@@ -526,6 +575,26 @@ class PyKTEvaluator:
         strat_results["freq_rare_le10"] = calculate_metrics(preds[mask_rare], targets[mask_rare])
         strat_results["freq_medium_11to100"] = calculate_metrics(preds[mask_med], targets[mask_med])
         strat_results["freq_frequent_gt100"] = calculate_metrics(preds[mask_freq], targets[mask_freq])
+
+        # 4. Extended binary calibration + Eedi pedagogical strata (when EediTestContext is attached)
+        if getattr(self, "eedi_ctx", None) is not None:
+            ext_global = compute_binary_metrics(preds, targets)
+            macro = student_macro_auc(preds, targets, self.eedi_ctx.student_index)
+            ext_global["student_macro_auc"] = macro["macro_auc"]
+            ext_global["student_macro_auc_std"] = macro["std_auc"]
+            strat_results["overall_extended"] = ext_global
+
+            eedi_strata: Dict[str, Dict[str, Any]] = {}
+            for s_name, s_mask in self.eedi_ctx.strata_masks().items():
+                if int(np.sum(s_mask)) == 0:
+                    eedi_strata[s_name] = {
+                        "auc": None, "acc": None, "rmse": None, "log_loss": None,
+                        "brier": None, "ece": None, "pos_rate": None,
+                        "mean_pred": None, "num_samples": 0,
+                    }
+                else:
+                    eedi_strata[s_name] = compute_binary_metrics(preds[s_mask], targets[s_mask])
+            strat_results["eedi_strata"] = eedi_strata
 
         return strat_results
 
